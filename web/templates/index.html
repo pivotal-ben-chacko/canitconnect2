@@ -1,0 +1,718 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cloud Foundry Connectivity Checker</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+            background-color: #f5f5f5;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        header {
+            background-color: #344048;
+            color: white;
+            padding: 20px 40px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header-title {
+            font-size: 24px;
+            font-weight: 600;
+        }
+
+        .logo-btn {
+            height: 40px;
+            background-color: #FB6400;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            padding: 0 16px;
+            gap: 16px;
+            transition: background-color 0.2s;
+        }
+
+        .logo-btn:hover {
+            background-color: #e55a00;
+        }
+
+        .hamburger-icon {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            width: 20px;
+        }
+
+        .hamburger-icon span {
+            display: block;
+            width: 20px;
+            height: 2px;
+            background-color: #FFFFFF;
+            border-radius: 2px;
+        }
+
+        .logo-btn svg {
+            display: block;
+        }
+
+        main {
+            flex: 1;
+            max-width: 800px;
+            width: 100%;
+            margin: 32px auto;
+            padding: 0 20px;
+        }
+
+        .card {
+            background-color: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            padding: 24px;
+            margin-bottom: 24px;
+        }
+
+        .card h2 {
+            font-size: 18px;
+            font-weight: 600;
+            color: #344048;
+            margin-bottom: 20px;
+        }
+
+        .form-group {
+            margin-bottom: 16px;
+        }
+
+        .form-group label {
+            display: block;
+            font-size: 13px;
+            font-weight: 600;
+            color: #344048;
+            margin-bottom: 6px;
+        }
+
+        .form-row {
+            display: flex;
+            gap: 16px;
+        }
+
+        .form-row .form-group {
+            flex: 1;
+        }
+
+        .form-row .form-group.port-group {
+            flex: 0 0 120px;
+        }
+
+        input, select {
+            width: 100%;
+            padding: 8px 12px;
+            font-size: 14px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background-color: white;
+            font-family: inherit;
+        }
+
+        input:focus, select:focus {
+            outline: none;
+            border-color: #FB6400;
+            box-shadow: 0 0 0 2px rgba(251, 100, 0, 0.15);
+        }
+
+        .check-types {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 20px;
+        }
+
+        .check-type-btn {
+            padding: 8px 16px;
+            font-size: 14px;
+            border: 1px solid #ddd;
+            background-color: white;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-family: inherit;
+            font-weight: 500;
+        }
+
+        .check-type-btn:hover {
+            border-color: #FB6400;
+            color: #FB6400;
+        }
+
+        .check-type-btn.active {
+            background-color: #FB6400;
+            color: white;
+            border-color: #FB6400;
+        }
+
+        .btn-run {
+            padding: 10px 32px;
+            font-size: 14px;
+            font-weight: 500;
+            background-color: #FB6400;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-family: inherit;
+            transition: background-color 0.2s;
+        }
+
+        .btn-run:hover {
+            background-color: #e55a00;
+        }
+
+        .btn-run:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+
+        .btn-run[style*="344048"]:hover:not(:disabled) {
+            background-color: #2a343b;
+        }
+
+        .results-card {
+            display: none;
+            position: relative;
+        }
+
+        .results-card.visible {
+            display: block;
+        }
+
+        .results-close {
+            position: absolute;
+            top: 16px;
+            right: 16px;
+            width: 28px;
+            height: 28px;
+            border: none;
+            background: none;
+            cursor: pointer;
+            font-size: 20px;
+            color: #999;
+            line-height: 28px;
+            text-align: center;
+            border-radius: 4px;
+            transition: all 0.2s;
+        }
+
+        .results-close:hover {
+            color: #344048;
+            background-color: #f0f0f0;
+        }
+
+        .result-meta {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .result-status {
+            font-size: 14px;
+            font-weight: 600;
+            padding: 4px 12px;
+            border-radius: 4px;
+        }
+
+        .result-status.success {
+            background-color: #d4edda;
+            color: #155724;
+        }
+
+        .result-status.failure {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+
+        .result-duration {
+            font-size: 13px;
+            color: #666;
+        }
+
+        .result-output {
+            background-color: #1e1e1e;
+            color: #d4d4d4;
+            padding: 16px;
+            border-radius: 4px;
+            font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Mono', 'Droid Sans Mono', 'Source Code Pro', monospace;
+            font-size: 13px;
+            line-height: 1.5;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 500px;
+            overflow-y: auto;
+        }
+
+        .spinner {
+            display: none;
+            align-items: center;
+            gap: 12px;
+            padding: 24px;
+            justify-content: center;
+            color: #666;
+            font-size: 14px;
+        }
+
+        .spinner.visible {
+            display: flex;
+        }
+
+        .spinner-icon {
+            width: 24px;
+            height: 24px;
+            border: 3px solid #eee;
+            border-top-color: #FB6400;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .error-msg {
+            background-color: #f8d7da;
+            color: #721c24;
+            padding: 12px 16px;
+            border-radius: 4px;
+            font-size: 14px;
+            margin-bottom: 12px;
+            display: none;
+        }
+
+        .error-msg.visible {
+            display: block;
+        }
+
+        footer {
+            background-color: #343a40;
+            color: white;
+            padding: 20px 40px;
+            text-align: center;
+            font-size: 14px;
+        }
+
+        footer a {
+            color: #FB6400;
+            text-decoration: none;
+        }
+
+        @media (max-width: 600px) {
+            header {
+                padding: 16px 20px;
+                flex-direction: column;
+                gap: 12px;
+                align-items: flex-start;
+            }
+            .header-title {
+                font-size: 18px;
+            }
+            main {
+                margin: 16px auto;
+            }
+            .form-row {
+                flex-direction: column;
+                gap: 0;
+            }
+            .form-row .form-group.port-group {
+                flex: 1;
+            }
+            .check-types {
+                flex-wrap: wrap;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <button class="logo-btn" aria-label="Navigation Menu">
+            <div class="hamburger-icon">
+                <span></span>
+                <span></span>
+                <span></span>
+            </div>
+            <svg width="80" height="28" xmlns="http://www.w3.org/2000/svg">
+                <text x="0" y="21" font-family="Arial, sans-serif" font-size="22" font-weight="300" fill="white">fiserv.</text>
+            </svg>
+        </button>
+        <div class="header-title">Cloud Foundry Connectivity Checker</div>
+    </header>
+
+    <main>
+        <div class="card">
+            <h2>Connection Check</h2>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="host">Host</label>
+                    <input type="text" id="host" placeholder="e.g. google.com or 10.0.0.1">
+                </div>
+                <div class="form-group port-group">
+                    <label for="port">Port</label>
+                    <input type="text" id="port" placeholder="443">
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label>Check Type</label>
+                <div class="check-types">
+                    <button class="check-type-btn active" data-type="netcat">Netcat</button>
+                    <button class="check-type-btn" data-type="openssl">OpenSSL</button>
+                    <button class="check-type-btn" data-type="traceroute">Traceroute</button>
+                    <button class="check-type-btn" data-type="ping">Ping</button>
+                    <button class="check-type-btn" data-type="telnet">Telnet</button>
+                </div>
+            </div>
+
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <button class="btn-run" id="runBtn" onclick="runCheck()">Run Check</button>
+                <button class="btn-run" id="scanBtn" onclick="runPortScan()" style="background-color: #344048;">Port Scan</button>
+            </div>
+        </div>
+
+        <div class="spinner" id="spinner">
+            <div class="spinner-icon"></div>
+            <span>Running check...</span>
+        </div>
+
+        <div class="error-msg" id="errorMsg"></div>
+
+        <div class="card results-card" id="resultsCard">
+            <button class="results-close" onclick="document.getElementById('resultsCard').classList.remove('visible')">&times;</button>
+            <h2>Results</h2>
+            <div class="result-meta">
+                <span class="result-status" id="resultStatus"></span>
+                <span class="result-duration" id="resultDuration"></span>
+            </div>
+            <pre class="result-output" id="resultOutput"></pre>
+        </div>
+
+        <div class="card">
+            <h2>Database Connectivity Checker</h2>
+            <div class="form-group">
+                <label for="dbType">Database Type</label>
+                <select id="dbType" onchange="onDbTypeChange()">
+                    <option value="oracle">Oracle</option>
+                    <option value="mysql">MySQL</option>
+                    <option value="postgres">PostgreSQL</option>
+                    <option value="redis">Redis</option>
+                </select>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="dbHost">Host</label>
+                    <input type="text" id="dbHost" placeholder="e.g. db-host.internal or 10.0.0.50">
+                </div>
+                <div class="form-group port-group">
+                    <label for="dbPort">Port</label>
+                    <input type="text" id="dbPort" placeholder="1521" value="1521">
+                </div>
+            </div>
+            <div class="form-group" id="dbNameGroup">
+                <label for="dbName" id="dbNameLabel">Service Name</label>
+                <input type="text" id="dbName" placeholder="e.g. ORCL or mydb.example.com">
+            </div>
+            <div class="form-row" id="dbUserGroup">
+                <div class="form-group">
+                    <label for="dbUser">Username</label>
+                    <input type="text" id="dbUser" placeholder="Username">
+                </div>
+                <div class="form-group">
+                    <label for="dbPass">Password</label>
+                    <input type="password" id="dbPass" placeholder="Password">
+                </div>
+            </div>
+            <button class="btn-run" id="dbRunBtn" onclick="runDbCheck()">Test Connection</button>
+        </div>
+
+        <div class="spinner" id="dbSpinner">
+            <div class="spinner-icon"></div>
+            <span>Connecting to database...</span>
+        </div>
+
+        <div class="error-msg" id="dbErrorMsg"></div>
+
+        <div class="card results-card" id="dbResultsCard">
+            <button class="results-close" onclick="document.getElementById('dbResultsCard').classList.remove('visible')">&times;</button>
+            <h2>Database Results</h2>
+            <div class="result-meta">
+                <span class="result-status" id="dbResultStatus"></span>
+                <span class="result-duration" id="dbResultDuration"></span>
+            </div>
+            <pre class="result-output" id="dbResultOutput"></pre>
+        </div>
+    </main>
+
+    <footer>
+        Cloud Foundry Connectivity Checker &mdash; Built for debugging network connectivity in CF environments
+    </footer>
+
+    <script>
+        let selectedType = 'netcat';
+
+        document.querySelectorAll('.check-type-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.check-type-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                selectedType = btn.dataset.type;
+
+                const portGroup = document.querySelector('.port-group');
+                if (selectedType === 'traceroute' || selectedType === 'ping') {
+                    portGroup.style.display = 'none';
+                } else {
+                    portGroup.style.display = '';
+                }
+            });
+        });
+
+        async function runCheck() {
+            const host = document.getElementById('host').value.trim();
+            const port = document.getElementById('port').value.trim();
+            const runBtn = document.getElementById('runBtn');
+            const spinner = document.getElementById('spinner');
+            const errorMsg = document.getElementById('errorMsg');
+            const resultsCard = document.getElementById('resultsCard');
+
+            // Validate
+            if (!host) {
+                showError('Please enter a host.');
+                return;
+            }
+
+            if (selectedType !== 'traceroute' && selectedType !== 'ping' && !port) {
+                showError('Please enter a port.');
+                return;
+            }
+
+            // Reset UI
+            errorMsg.classList.remove('visible');
+            resultsCard.classList.remove('visible');
+            spinner.classList.add('visible');
+            runBtn.disabled = true;
+
+            try {
+                const body = { host };
+                if (selectedType !== 'traceroute' && selectedType !== 'ping') {
+                    body.port = port;
+                }
+
+                const resp = await fetch('/api/check/' + selectedType, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+
+                const data = await resp.json();
+
+                if (!resp.ok) {
+                    showError(data.error || 'Request failed');
+                    return;
+                }
+
+                // Show results
+                const resultStatus = document.getElementById('resultStatus');
+                const resultDuration = document.getElementById('resultDuration');
+                const resultOutput = document.getElementById('resultOutput');
+
+                resultStatus.textContent = data.success ? 'Success' : 'Failed';
+                resultStatus.className = 'result-status ' + (data.success ? 'success' : 'failure');
+                resultDuration.textContent = data.duration_ms + ' ms';
+
+                let output = data.output || '';
+                if (data.error && !data.success) {
+                    output += (output ? '\n\n' : '') + 'Error: ' + data.error;
+                }
+                resultOutput.textContent = output || 'No output';
+
+                resultsCard.classList.add('visible');
+            } catch (err) {
+                showError('Network error: ' + err.message);
+            } finally {
+                spinner.classList.remove('visible');
+                runBtn.disabled = false;
+            }
+        }
+
+        async function runPortScan() {
+            const host = document.getElementById('host').value.trim();
+            const runBtn = document.getElementById('scanBtn');
+            const spinner = document.getElementById('spinner');
+            const errorMsg = document.getElementById('errorMsg');
+            const resultsCard = document.getElementById('resultsCard');
+
+            if (!host) {
+                showError('Please enter a host.');
+                return;
+            }
+
+            errorMsg.classList.remove('visible');
+            resultsCard.classList.remove('visible');
+            spinner.classList.add('visible');
+            document.querySelector('#spinner span').textContent = 'Scanning ports...';
+            runBtn.disabled = true;
+            document.getElementById('runBtn').disabled = true;
+
+            try {
+                const resp = await fetch('/api/check/portscan', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ host }),
+                });
+
+                const data = await resp.json();
+
+                if (!resp.ok) {
+                    showError(data.error || 'Request failed');
+                    return;
+                }
+
+                const resultStatus = document.getElementById('resultStatus');
+                const resultDuration = document.getElementById('resultDuration');
+                const resultOutput = document.getElementById('resultOutput');
+
+                resultStatus.textContent = 'Scan Complete';
+                resultStatus.className = 'result-status success';
+                resultDuration.textContent = data.duration_ms + ' ms';
+                resultOutput.textContent = data.output || 'No output';
+
+                resultsCard.classList.add('visible');
+            } catch (err) {
+                showError('Network error: ' + err.message);
+            } finally {
+                spinner.classList.remove('visible');
+                document.querySelector('#spinner span').textContent = 'Running check...';
+                runBtn.disabled = false;
+                document.getElementById('runBtn').disabled = false;
+            }
+        }
+
+        function showError(msg) {
+            const errorMsg = document.getElementById('errorMsg');
+            errorMsg.textContent = msg;
+            errorMsg.classList.add('visible');
+            document.getElementById('spinner').classList.remove('visible');
+            document.getElementById('runBtn').disabled = false;
+        }
+
+        const dbDefaults = {
+            oracle:   { port: '1521', label: 'Service Name', placeholder: 'e.g. ORCL or mydb.example.com', needsDb: true, needsUser: true },
+            mysql:    { port: '3306', label: 'Database Name', placeholder: 'e.g. mydb', needsDb: true, needsUser: true },
+            postgres: { port: '5432', label: 'Database Name', placeholder: 'e.g. mydb', needsDb: true, needsUser: true },
+            redis:    { port: '6379', label: 'DB Index', placeholder: '0 (default)', needsDb: false, needsUser: false },
+        };
+
+        function onDbTypeChange() {
+            const dbType = document.getElementById('dbType').value;
+            const defaults = dbDefaults[dbType];
+            document.getElementById('dbPort').value = defaults.port;
+            document.getElementById('dbPort').placeholder = defaults.port;
+            document.getElementById('dbNameLabel').textContent = defaults.label;
+            document.getElementById('dbName').placeholder = defaults.placeholder;
+            document.getElementById('dbName').value = '';
+            document.getElementById('dbNameGroup').style.display = defaults.needsDb ? '' : 'none';
+            document.getElementById('dbUserGroup').style.display = defaults.needsUser ? '' : 'none';
+        }
+
+        async function runDbCheck() {
+            const dbType = document.getElementById('dbType').value;
+            const host = document.getElementById('dbHost').value.trim();
+            const port = document.getElementById('dbPort').value.trim();
+            const database = document.getElementById('dbName').value.trim();
+            const username = document.getElementById('dbUser').value.trim();
+            const password = document.getElementById('dbPass').value;
+            const runBtn = document.getElementById('dbRunBtn');
+            const spinner = document.getElementById('dbSpinner');
+            const errorMsg = document.getElementById('dbErrorMsg');
+            const resultsCard = document.getElementById('dbResultsCard');
+
+            const defaults = dbDefaults[dbType];
+            if (!host) { showDbError('Please enter a host.'); return; }
+            if (!port) { showDbError('Please enter a port.'); return; }
+            if (defaults.needsDb && !database) { showDbError('Please enter a ' + defaults.label.toLowerCase() + '.'); return; }
+            if (defaults.needsUser && !username) { showDbError('Please enter a username.'); return; }
+
+            errorMsg.classList.remove('visible');
+            resultsCard.classList.remove('visible');
+            spinner.classList.add('visible');
+            runBtn.disabled = true;
+
+            try {
+                const resp = await fetch('/api/check/database', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ db_type: dbType, host, port, database, username, password }),
+                });
+
+                const data = await resp.json();
+
+                if (!resp.ok) {
+                    showDbError(data.error || 'Request failed');
+                    return;
+                }
+
+                const resultStatus = document.getElementById('dbResultStatus');
+                const resultDuration = document.getElementById('dbResultDuration');
+                const resultOutput = document.getElementById('dbResultOutput');
+
+                resultStatus.textContent = data.success ? 'Connected' : 'Failed';
+                resultStatus.className = 'result-status ' + (data.success ? 'success' : 'failure');
+                resultDuration.textContent = data.duration_ms + ' ms';
+
+                let output = data.output || '';
+                if (data.error && !data.success) {
+                    output += (output ? '\n\n' : '') + 'Error: ' + data.error;
+                }
+                resultOutput.textContent = output || 'No output';
+
+                resultsCard.classList.add('visible');
+            } catch (err) {
+                showDbError('Network error: ' + err.message);
+            } finally {
+                spinner.classList.remove('visible');
+                runBtn.disabled = false;
+            }
+        }
+
+        function showDbError(msg) {
+            const errorMsg = document.getElementById('dbErrorMsg');
+            errorMsg.textContent = msg;
+            errorMsg.classList.add('visible');
+            document.getElementById('dbSpinner').classList.remove('visible');
+            document.getElementById('dbRunBtn').disabled = false;
+        }
+
+        // Allow Enter key to submit
+        document.getElementById('host').addEventListener('keydown', e => {
+            if (e.key === 'Enter') runCheck();
+        });
+        document.getElementById('port').addEventListener('keydown', e => {
+            if (e.key === 'Enter') runCheck();
+        });
+        document.querySelectorAll('#dbHost, #dbPort, #dbName, #dbUser, #dbPass').forEach(el => {
+            el.addEventListener('keydown', e => {
+                if (e.key === 'Enter') runDbCheck();
+            });
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+---
+applications:
+  - name: canitconnect2
+    memory: 64M
+    disk_quota: 256M
+    buildpacks:
+      - go_buildpack
+    health-check-type: http
+    health-check-http-endpoint: /api/health
