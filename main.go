@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -52,7 +53,8 @@ func main() {
 	r.LoadHTMLGlob("web/templates/*")
 
 	r.GET("/", func(c *gin.Context) {
-		c.HTML(http.StatusOK, "index.html", nil)
+		cfInfo := parseCFInfo()
+		c.HTML(http.StatusOK, "index.html", cfInfo)
 	})
 
 	r.GET("/api/health", func(c *gin.Context) {
@@ -64,6 +66,7 @@ func main() {
 	r.POST("/api/check/traceroute", handleTraceroute)
 	r.POST("/api/check/ping", handlePing)
 	r.POST("/api/check/telnet", handleTelnet)
+	r.POST("/api/check/dig", handleDig)
 	r.POST("/api/check/database", handleDatabase)
 	r.POST("/api/check/portscan", handlePortScan)
 
@@ -72,6 +75,38 @@ func main() {
 		port = "8080"
 	}
 	r.Run(":" + port)
+}
+
+func parseCFInfo() gin.H {
+	vcap := os.Getenv("VCAP_APPLICATION")
+	if vcap == "" {
+		return gin.H{}
+	}
+
+	var data map[string]interface{}
+	if err := json.Unmarshal([]byte(vcap), &data); err != nil {
+		return gin.H{}
+	}
+
+	info := gin.H{}
+	if v, ok := data["organization_name"].(string); ok {
+		info["Org"] = v
+	}
+	if v, ok := data["space_name"].(string); ok {
+		info["Space"] = v
+	}
+	if v, ok := data["application_name"].(string); ok {
+		info["App"] = v
+	}
+	if v, ok := data["cf_api"].(string); ok {
+		info["API"] = v
+	}
+	instanceIP := os.Getenv("CF_INSTANCE_IP")
+	if instanceIP != "" {
+		info["InstanceIP"] = instanceIP
+	}
+
+	return info
 }
 
 func validateHost(host string) error {
@@ -238,6 +273,33 @@ func handleTelnet(c *gin.Context) {
 		conn.Close()
 		resp.Success = true
 		resp.Output = fmt.Sprintf("Trying %s...\nConnected to %s.\nConnection closed.", target, target)
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+func handleDig(c *gin.Context) {
+	var req CheckRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, CheckResponse{Error: "invalid request body"})
+		return
+	}
+
+	if err := validateHost(req.Host); err != nil {
+		c.JSON(http.StatusBadRequest, CheckResponse{Error: err.Error()})
+		return
+	}
+
+	output, err, duration := runCommand(30*time.Second, "dig", req.Host)
+	resp := CheckResponse{
+		Output:     strings.TrimSpace(output),
+		DurationMs: duration.Milliseconds(),
+	}
+	if err != nil {
+		resp.Success = false
+		resp.Error = err.Error()
+	} else {
+		resp.Success = true
 	}
 
 	c.JSON(http.StatusOK, resp)
