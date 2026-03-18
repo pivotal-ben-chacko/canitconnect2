@@ -71,7 +71,9 @@ func NewFileAWSCredentials(filename, profile string) *Credentials {
 	})
 }
 
-func (p *FileAWSCredentials) retrieve() (Value, error) {
+// Retrieve reads and extracts the shared credentials from the current
+// users home directory.
+func (p *FileAWSCredentials) Retrieve() (Value, error) {
 	if p.Filename == "" {
 		p.Filename = os.Getenv("AWS_SHARED_CREDENTIALS_FILE")
 		if p.Filename == "" {
@@ -138,17 +140,6 @@ func (p *FileAWSCredentials) retrieve() (Value, error) {
 		SessionToken:    token.String(),
 		SignerType:      SignatureV4,
 	}, nil
-}
-
-// Retrieve reads and extracts the shared credentials from the current
-// users home directory.
-func (p *FileAWSCredentials) Retrieve() (Value, error) {
-	return p.retrieve()
-}
-
-// RetrieveWithCredContext is like Retrieve(), cred context is no-op for File credentials
-func (p *FileAWSCredentials) RetrieveWithCredContext(_ *CredContext) (Value, error) {
-	return p.retrieve()
 }
 
 // loadProfiles loads from the file pointed to by shared credentials filename for profile.

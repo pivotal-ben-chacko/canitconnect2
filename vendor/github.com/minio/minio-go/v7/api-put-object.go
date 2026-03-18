@@ -26,12 +26,10 @@ import (
 	"io"
 	"net/http"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/minio/minio-go/v7/pkg/encrypt"
 	"github.com/minio/minio-go/v7/pkg/s3utils"
-	"github.com/minio/minio-go/v7/pkg/tags"
 	"golang.org/x/net/http/httpguts"
 )
 
@@ -150,7 +148,7 @@ func (opts PutObjectOptions) getNumThreads() (numThreads int) {
 	} else {
 		numThreads = totalWorkers
 	}
-	return numThreads
+	return
 }
 
 // Header - constructs the headers from metadata entered by user in
@@ -231,9 +229,7 @@ func (opts PutObjectOptions) Header() (header http.Header) {
 	}
 
 	if len(opts.UserTags) != 0 {
-		if tags, _ := tags.NewTags(opts.UserTags, true); tags != nil {
-			header.Set(amzTaggingHeader, tags.String())
-		}
+		header.Set(amzTaggingHeader, s3utils.TagEncode(opts.UserTags))
 	}
 
 	for k, v := range opts.UserMetadata {
@@ -249,7 +245,7 @@ func (opts PutObjectOptions) Header() (header http.Header) {
 		header[k] = v
 	}
 
-	return header
+	return
 }
 
 // validate() checks if the UserMetadata map has standard headers or and raises an error if so.
@@ -268,16 +264,7 @@ func (opts PutObjectOptions) validate(c *Client) (err error) {
 	if opts.LegalHold != "" && !opts.LegalHold.IsValid() {
 		return errInvalidArgument(opts.LegalHold.String() + " unsupported legal-hold status")
 	}
-
-	checkCrc := false
-	for k := range opts.UserMetadata {
-		if strings.HasPrefix(k, "x-amz-checksum-") {
-			checkCrc = true
-			break
-		}
-	}
-
-	if opts.Checksum.IsSet() || checkCrc {
+	if opts.Checksum.IsSet() {
 		switch {
 		case !c.trailingHeaderSupport:
 			return errInvalidArgument("Checksum requires Client with TrailingHeaders enabled")
@@ -311,18 +298,16 @@ func (a completedParts) Less(i, j int) bool { return a[i].PartNumber < a[j].Part
 //
 //   - For size input as -1 PutObject does a multipart Put operation
 //     until input stream reaches EOF. Maximum object size that can
-//     be uploaded through this operation will be 5TiB by default.
-//     For larger objects (up to ~48.83TiB), set PutObjectOptions.PartSize
-//     to control memory usage and enable uploads beyond 5TiB.
+//     be uploaded through this operation will be 5TiB.
 //
 //     WARNING: Passing down '-1' will use memory and these cannot
 //     be reused for best outcomes for PutObject(), pass the size always.
 //
 // NOTE: Upon errors during upload multipart operation is entirely aborted.
-func (c *Client) PutObject(ctx context.Context, bucketName, objectName string, reader io.Reader, size int64,
+func (c *Client) PutObject(ctx context.Context, bucketName, objectName string, reader io.Reader, objectSize int64,
 	opts PutObjectOptions,
 ) (info UploadInfo, err error) {
-	if size < 0 && opts.DisableMultipart {
+	if objectSize < 0 && opts.DisableMultipart {
 		return UploadInfo{}, errors.New("object size must be provided with disable multipart upload")
 	}
 
@@ -331,20 +316,15 @@ func (c *Client) PutObject(ctx context.Context, bucketName, objectName string, r
 		return UploadInfo{}, err
 	}
 
+	return c.putObjectCommon(ctx, bucketName, objectName, reader, objectSize, opts)
+}
+
+func (c *Client) putObjectCommon(ctx context.Context, bucketName, objectName string, reader io.Reader, size int64, opts PutObjectOptions) (info UploadInfo, err error) {
 	// Check for largest object size allowed.
-	if size > int64(maxObjectSize) {
-		return UploadInfo{}, errEntityTooLarge(size, maxObjectSize, bucketName, objectName)
+	if size > int64(maxMultipartPutObjectSize) {
+		return UploadInfo{}, errEntityTooLarge(size, maxMultipartPutObjectSize, bucketName, objectName)
 	}
-
-	if opts.Checksum.IsSet() {
-		opts.AutoChecksum = opts.Checksum
-		opts.SendContentMd5 = false
-	}
-
-	if c.trailingHeaderSupport {
-		opts.AutoChecksum.SetDefault(ChecksumCRC32C)
-		addAutoChecksumHeaders(&opts)
-	}
+	opts.AutoChecksum.SetDefault(ChecksumCRC32C)
 
 	// NOTE: Streaming signature is not supported by GCS.
 	if s3utils.IsGoogleEndpoint(*c.endpointURL) {
@@ -402,11 +382,20 @@ func (c *Client) putObjectMultipartStreamNoLength(ctx context.Context, bucketNam
 		return UploadInfo{}, err
 	}
 
+	if opts.Checksum.IsSet() {
+		opts.SendContentMd5 = false
+		opts.AutoChecksum = opts.Checksum
+	}
+	if !opts.SendContentMd5 {
+		addAutoChecksumHeaders(&opts)
+	}
+
 	// Initiate a new multipart upload.
 	uploadID, err := c.newUploadID(ctx, bucketName, objectName, opts)
 	if err != nil {
 		return UploadInfo{}, err
 	}
+	delete(opts.UserMetadata, "X-Amz-Checksum-Algorithm")
 
 	defer func() {
 		if err != nil {
@@ -445,17 +434,11 @@ func (c *Client) putObjectMultipartStreamNoLength(ctx context.Context, bucketNam
 			hash.Write(buf[:length])
 			md5Base64 = base64.StdEncoding.EncodeToString(hash.Sum(nil))
 			hash.Close()
-		}
-
-		if opts.AutoChecksum.IsSet() {
+		} else {
 			crc.Reset()
 			crc.Write(buf[:length])
 			cSum := crc.Sum(nil)
 			customHeader.Set(opts.AutoChecksum.Key(), base64.StdEncoding.EncodeToString(cSum))
-			customHeader.Set(amzChecksumAlgo, opts.AutoChecksum.String())
-			if opts.AutoChecksum.FullObjectRequested() {
-				customHeader.Set(amzChecksumMode, ChecksumFullObjectMode.String())
-			}
 		}
 
 		// Update progress reader appropriately to the latest offset

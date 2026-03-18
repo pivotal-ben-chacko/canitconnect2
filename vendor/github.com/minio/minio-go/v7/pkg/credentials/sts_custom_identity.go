@@ -53,8 +53,6 @@ type AssumeRoleWithCustomTokenResponse struct {
 type CustomTokenIdentity struct {
 	Expiry
 
-	// Optional http Client to use when connecting to MinIO STS service.
-	// (overrides default client in CredContext)
 	Client *http.Client
 
 	// MinIO server STS endpoint to fetch STS credentials.
@@ -69,26 +67,11 @@ type CustomTokenIdentity struct {
 	// RequestedExpiry is to set the validity of the generated credentials
 	// (this value bounded by server).
 	RequestedExpiry time.Duration
-
-	// Optional, used for token revokation
-	TokenRevokeType string
 }
 
-// RetrieveWithCredContext with Retrieve optionally cred context
-func (c *CustomTokenIdentity) RetrieveWithCredContext(cc *CredContext) (value Value, err error) {
-	if cc == nil {
-		cc = defaultCredContext
-	}
-
-	stsEndpoint := c.STSEndpoint
-	if stsEndpoint == "" {
-		stsEndpoint = cc.Endpoint
-	}
-	if stsEndpoint == "" {
-		return Value{}, errors.New("STS endpoint unknown")
-	}
-
-	u, err := url.Parse(stsEndpoint)
+// Retrieve - to satisfy Provider interface; fetches credentials from MinIO.
+func (c *CustomTokenIdentity) Retrieve() (value Value, err error) {
+	u, err := url.Parse(c.STSEndpoint)
 	if err != nil {
 		return value, err
 	}
@@ -101,9 +84,6 @@ func (c *CustomTokenIdentity) RetrieveWithCredContext(cc *CredContext) (value Va
 	if c.RequestedExpiry != 0 {
 		v.Set("DurationSeconds", fmt.Sprintf("%d", int(c.RequestedExpiry.Seconds())))
 	}
-	if c.TokenRevokeType != "" {
-		v.Set("TokenRevokeType", c.TokenRevokeType)
-	}
 
 	u.RawQuery = v.Encode()
 
@@ -112,15 +92,7 @@ func (c *CustomTokenIdentity) RetrieveWithCredContext(cc *CredContext) (value Va
 		return value, err
 	}
 
-	client := c.Client
-	if client == nil {
-		client = cc.Client
-	}
-	if client == nil {
-		client = defaultCredContext.Client
-	}
-
-	resp, err := client.Do(req)
+	resp, err := c.Client.Do(req)
 	if err != nil {
 		return value, err
 	}
@@ -132,7 +104,7 @@ func (c *CustomTokenIdentity) RetrieveWithCredContext(cc *CredContext) (value Va
 
 	r := AssumeRoleWithCustomTokenResponse{}
 	if err = xml.NewDecoder(resp.Body).Decode(&r); err != nil {
-		return value, err
+		return
 	}
 
 	cr := r.Result.Credentials
@@ -146,15 +118,11 @@ func (c *CustomTokenIdentity) RetrieveWithCredContext(cc *CredContext) (value Va
 	}, nil
 }
 
-// Retrieve - to satisfy Provider interface; fetches credentials from MinIO.
-func (c *CustomTokenIdentity) Retrieve() (value Value, err error) {
-	return c.RetrieveWithCredContext(nil)
-}
-
 // NewCustomTokenCredentials - returns credentials using the
 // AssumeRoleWithCustomToken STS API.
 func NewCustomTokenCredentials(stsEndpoint, token, roleArn string, optFuncs ...CustomTokenOpt) (*Credentials, error) {
 	c := CustomTokenIdentity{
+		Client:      &http.Client{Transport: http.DefaultTransport},
 		STSEndpoint: stsEndpoint,
 		Token:       token,
 		RoleArn:     roleArn,

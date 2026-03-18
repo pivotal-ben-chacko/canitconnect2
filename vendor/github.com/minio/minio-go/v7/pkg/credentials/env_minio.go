@@ -38,7 +38,8 @@ func NewEnvMinio() *Credentials {
 	return New(&EnvMinio{})
 }
 
-func (e *EnvMinio) retrieve() (Value, error) {
+// Retrieve retrieves the keys from the environment.
+func (e *EnvMinio) Retrieve() (Value, error) {
 	e.retrieved = false
 
 	id := os.Getenv("MINIO_ROOT_USER")
@@ -59,16 +60,6 @@ func (e *EnvMinio) retrieve() (Value, error) {
 		SecretAccessKey: secret,
 		SignerType:      signerType,
 	}, nil
-}
-
-// Retrieve retrieves the keys from the environment.
-func (e *EnvMinio) Retrieve() (Value, error) {
-	return e.retrieve()
-}
-
-// RetrieveWithCredContext is like Retrieve() (no-op input cred context)
-func (e *EnvMinio) RetrieveWithCredContext(_ *CredContext) (Value, error) {
-	return e.retrieve()
 }
 
 // IsExpired returns if the credentials have been retrieved.

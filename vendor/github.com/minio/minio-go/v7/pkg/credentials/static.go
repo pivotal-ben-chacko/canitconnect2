@@ -59,11 +59,6 @@ func (s *Static) Retrieve() (Value, error) {
 	return s.Value, nil
 }
 
-// RetrieveWithCredContext returns the static credentials.
-func (s *Static) RetrieveWithCredContext(_ *CredContext) (Value, error) {
-	return s.Retrieve()
-}
-
 // IsExpired returns if the credentials are expired.
 //
 // For Static, the credentials never expired.
