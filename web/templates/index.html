@@ -451,6 +451,7 @@
                     <option value="mysql">MySQL</option>
                     <option value="postgres">PostgreSQL</option>
                     <option value="redis">Redis</option>
+                    <option value="s3">S3-Compatible</option>
                 </select>
             </div>
             <div class="form-row">
@@ -466,6 +467,10 @@
             <div class="form-group" id="dbNameGroup">
                 <label for="dbName" id="dbNameLabel">Service Name</label>
                 <input type="text" id="dbName" placeholder="e.g. ORCL or mydb.example.com">
+            </div>
+            <div class="form-group" id="dbRegionGroup" style="display: none;">
+                <label for="dbRegion">Region</label>
+                <input type="text" id="dbRegion" placeholder="e.g. us-east-1 (default)" value="">
             </div>
             <div class="form-row" id="dbUserGroup">
                 <div class="form-group">
@@ -650,10 +655,11 @@
         }
 
         const dbDefaults = {
-            oracle:   { port: '1521', label: 'Service Name', placeholder: 'e.g. ORCL or mydb.example.com', needsDb: true, needsUser: true },
-            mysql:    { port: '3306', label: 'Database Name', placeholder: 'e.g. mydb', needsDb: true, needsUser: true },
-            postgres: { port: '5432', label: 'Database Name', placeholder: 'e.g. mydb', needsDb: true, needsUser: true },
-            redis:    { port: '6379', label: 'DB Index', placeholder: '0 (default)', needsDb: false, needsUser: false },
+            oracle:   { port: '1521', label: 'Service Name', placeholder: 'e.g. ORCL or mydb.example.com', needsDb: true, needsUser: true, userLabel: 'Username', passLabel: 'Password', hostPlaceholder: 'e.g. db-host.internal or 10.0.0.50' },
+            mysql:    { port: '3306', label: 'Database Name', placeholder: 'e.g. mydb', needsDb: true, needsUser: true, userLabel: 'Username', passLabel: 'Password', hostPlaceholder: 'e.g. db-host.internal or 10.0.0.50' },
+            postgres: { port: '5432', label: 'Database Name', placeholder: 'e.g. mydb', needsDb: true, needsUser: true, userLabel: 'Username', passLabel: 'Password', hostPlaceholder: 'e.g. db-host.internal or 10.0.0.50' },
+            redis:    { port: '6379', label: 'DB Index', placeholder: '0 (default)', needsDb: false, needsUser: false, userLabel: 'Username', passLabel: 'Password', hostPlaceholder: 'e.g. redis.internal or 10.0.0.50' },
+            s3:       { port: '443', label: 'Bucket (optional)', placeholder: 'e.g. my-bucket (leave empty to list all)', needsDb: false, needsUser: true, userLabel: 'Access Key', passLabel: 'Secret Key', hostPlaceholder: 'e.g. s3.amazonaws.com or minio.internal' },
         };
 
         function onDbTypeChange() {
@@ -664,8 +670,13 @@
             document.getElementById('dbNameLabel').textContent = defaults.label;
             document.getElementById('dbName').placeholder = defaults.placeholder;
             document.getElementById('dbName').value = '';
-            document.getElementById('dbNameGroup').style.display = defaults.needsDb ? '' : 'none';
-            document.getElementById('dbUserGroup').style.display = defaults.needsUser ? '' : 'none';
+            document.getElementById('dbNameGroup').style.display = (defaults.needsDb || dbType === 's3') ? '' : 'none';
+            document.getElementById('dbUserGroup').style.display = (defaults.needsUser || dbType === 's3') ? '' : 'none';
+            document.getElementById('dbHost').placeholder = defaults.hostPlaceholder;
+            document.querySelector('label[for="dbUser"]').textContent = defaults.userLabel;
+            document.querySelector('label[for="dbPass"]').textContent = defaults.passLabel;
+            document.getElementById('dbRegionGroup').style.display = dbType === 's3' ? '' : 'none';
+            document.getElementById('dbRegion').value = '';
         }
 
         async function runDbCheck() {
@@ -692,10 +703,14 @@
             runBtn.disabled = true;
 
             try {
+                const region = document.getElementById('dbRegion').value.trim();
+                const payload = { db_type: dbType, host, port, database, username, password };
+                if (region) payload.region = region;
+
                 const resp = await fetch('/api/check/database', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ db_type: dbType, host, port, database, username, password }),
+                    body: JSON.stringify(payload),
                 });
 
                 const data = await resp.json();

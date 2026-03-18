@@ -16,6 +16,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/credentials"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/gin-gonic/gin"
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/lib/pq"
@@ -37,6 +41,7 @@ type DBCheckRequest struct {
 	Database string `json:"database"`
 	Username string `json:"username"`
 	Password string `json:"password"`
+	Region   string `json:"region"`
 }
 
 type CheckResponse struct {
@@ -325,6 +330,11 @@ func handleDatabase(c *gin.Context) {
 		handleRedis(c, req)
 		return
 	}
+	// S3 uses different fields
+	if req.DBType == "s3" {
+		handleS3(c, req)
+		return
+	}
 
 	if req.Database == "" {
 		c.JSON(http.StatusBadRequest, CheckResponse{Error: "database/service name is required"})
@@ -534,6 +544,119 @@ func handlePortScan(c *gin.Context) {
 	output.WriteString(strings.Repeat("─", 52) + "\n")
 	output.WriteString(fmt.Sprintf("\n%d open, %d closed/filtered out of %d ports scanned\n", openCount, len(commonPorts)-openCount, len(commonPorts)))
 
+	c.JSON(http.StatusOK, CheckResponse{
+		Success:    true,
+		Output:     output.String(),
+		DurationMs: duration.Milliseconds(),
+	})
+}
+
+func handleS3(c *gin.Context, req DBCheckRequest) {
+	// For S3: Host = endpoint URL, Username = access key, Password = secret key, Database = bucket (optional)
+	if req.Username == "" {
+		c.JSON(http.StatusBadRequest, CheckResponse{Error: "access key is required"})
+		return
+	}
+	if req.Password == "" {
+		c.JSON(http.StatusBadRequest, CheckResponse{Error: "secret key is required"})
+		return
+	}
+
+	region := req.Region
+	if region == "" {
+		region = "us-east-1"
+	}
+
+	// If host looks like AWS S3, normalize to the correct regional endpoint
+	endpoint := fmt.Sprintf("https://%s:%s", req.Host, req.Port)
+	if req.Host == "s3.amazonaws.com" || strings.HasSuffix(req.Host, ".amazonaws.com") {
+		endpoint = fmt.Sprintf("https://s3.%s.amazonaws.com", region)
+		// Extract region from host if user already specified it (e.g. s3.us-west-2.amazonaws.com)
+		if req.Host != "s3.amazonaws.com" {
+			parts := strings.TrimSuffix(req.Host, ".amazonaws.com")
+			parts = strings.TrimPrefix(parts, "s3.")
+			if parts != "" && req.Region == "" {
+				region = parts
+				endpoint = fmt.Sprintf("https://s3.%s.amazonaws.com", region)
+			}
+		}
+	}
+
+	start := time.Now()
+	var output strings.Builder
+
+	output.WriteString(fmt.Sprintf("Connecting to S3-compatible store at %s (region: %s)...\n", endpoint, region))
+
+	sess, err := session.NewSession(&aws.Config{
+		Endpoint:         aws.String(endpoint),
+		Region:           aws.String(region),
+		Credentials:      credentials.NewStaticCredentials(req.Username, req.Password, ""),
+		S3ForcePathStyle: aws.Bool(true),
+		DisableSSL:       aws.Bool(false),
+	})
+	if err != nil {
+		duration := time.Since(start)
+		output.WriteString(fmt.Sprintf("Failed to create session: %s\n", err.Error()))
+		c.JSON(http.StatusOK, CheckResponse{
+			Success:    false,
+			Output:     output.String(),
+			Error:      err.Error(),
+			DurationMs: duration.Milliseconds(),
+		})
+		return
+	}
+
+	svc := s3.New(sess)
+
+	if req.Database != "" {
+		// Check specific bucket
+		output.WriteString(fmt.Sprintf("Checking bucket: %s\n", req.Database))
+		result, err := svc.ListObjectsV2(&s3.ListObjectsV2Input{
+			Bucket:  aws.String(req.Database),
+			MaxKeys: aws.Int64(5),
+		})
+		if err != nil {
+			duration := time.Since(start)
+			output.WriteString(fmt.Sprintf("Bucket check FAILED: %s\n", err.Error()))
+			c.JSON(http.StatusOK, CheckResponse{
+				Success:    false,
+				Output:     output.String(),
+				Error:      err.Error(),
+				DurationMs: duration.Milliseconds(),
+			})
+			return
+		}
+		output.WriteString("Connection successful!\n\n")
+		output.WriteString(fmt.Sprintf("Bucket '%s' is accessible\n", req.Database))
+		output.WriteString(fmt.Sprintf("Objects found (showing up to 5):\n"))
+		if len(result.Contents) == 0 {
+			output.WriteString("  (empty bucket)\n")
+		}
+		for _, obj := range result.Contents {
+			output.WriteString(fmt.Sprintf("  %s (%d bytes)\n", *obj.Key, *obj.Size))
+		}
+	} else {
+		// List buckets
+		result, err := svc.ListBuckets(&s3.ListBucketsInput{})
+		if err != nil {
+			duration := time.Since(start)
+			output.WriteString(fmt.Sprintf("Connection FAILED: %s\n", err.Error()))
+			c.JSON(http.StatusOK, CheckResponse{
+				Success:    false,
+				Output:     output.String(),
+				Error:      err.Error(),
+				DurationMs: duration.Milliseconds(),
+			})
+			return
+		}
+		output.WriteString("Connection successful!\n\n")
+		output.WriteString(fmt.Sprintf("Buckets found: %d\n", len(result.Buckets)))
+		for _, b := range result.Buckets {
+			output.WriteString(fmt.Sprintf("  %s (created %s)\n", *b.Name, b.CreationDate.Format(time.RFC3339)))
+		}
+	}
+
+	duration := time.Since(start)
 	c.JSON(http.StatusOK, CheckResponse{
 		Success:    true,
 		Output:     output.String(),
