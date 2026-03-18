@@ -1,8 +1,8 @@
 ---
 applications:
   - name: canitconnect2
-    memory: 64M
-    disk_quota: 256M
+    memory: 1G
+    disk_quota: 1G
     buildpacks:
       - go_buildpack
     health-check-type: http

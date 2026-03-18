@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"database/sql"
+	"embed"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"net"
 	"net/http"
 	"os"
@@ -24,6 +26,9 @@ import (
 	"github.com/redis/go-redis/v9"
 	_ "github.com/sijms/go-ora/v2"
 )
+
+//go:embed web/templates/*
+var templateFS embed.FS
 
 var hostRegex = regexp.MustCompile(`^[a-zA-Z0-9.:_-]+$`)
 
@@ -53,7 +58,8 @@ func main() {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
 
-	r.LoadHTMLGlob("web/templates/*")
+	tmpl := template.Must(template.ParseFS(templateFS, "web/templates/*"))
+	r.SetHTMLTemplate(tmpl)
 
 	r.GET("/", func(c *gin.Context) {
 		cfInfo := parseCFInfo()
