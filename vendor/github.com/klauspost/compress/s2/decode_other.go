@@ -11,8 +11,6 @@ package s2
 import (
 	"fmt"
 	"strconv"
-
-	"github.com/klauspost/compress/internal/le"
 )
 
 // decode writes the decoding of src to dst. It assumes that the varint-encoded
@@ -40,18 +38,21 @@ func s2Decode(dst, src []byte) int {
 			case x < 60:
 				s++
 			case x == 60:
-				x = uint32(src[s+1])
 				s += 2
+				x = uint32(src[s-1])
 			case x == 61:
-				x = uint32(le.Load16(src, s+1))
+				in := src[s : s+3]
+				x = uint32(in[1]) | uint32(in[2])<<8
 				s += 3
 			case x == 62:
+				in := src[s : s+4]
 				// Load as 32 bit and shift down.
-				x = le.Load32(src, s)
+				x = uint32(in[0]) | uint32(in[1])<<8 | uint32(in[2])<<16 | uint32(in[3])<<24
 				x >>= 8
 				s += 4
 			case x == 63:
-				x = le.Load32(src, s+1)
+				in := src[s : s+5]
+				x = uint32(in[1]) | uint32(in[2])<<8 | uint32(in[3])<<16 | uint32(in[4])<<24
 				s += 5
 			}
 			length = int(x) + 1
@@ -84,7 +85,8 @@ func s2Decode(dst, src []byte) int {
 					length = int(src[s]) + 4
 					s += 1
 				case 6:
-					length = int(le.Load16(src, s)) + 1<<8
+					in := src[s : s+2]
+					length = int(uint32(in[0])|(uint32(in[1])<<8)) + (1 << 8)
 					s += 2
 				case 7:
 					in := src[s : s+3]
@@ -97,13 +99,15 @@ func s2Decode(dst, src []byte) int {
 			}
 			length += 4
 		case tagCopy2:
-			offset = int(le.Load16(src, s+1))
-			length = 1 + int(src[s])>>2
+			in := src[s : s+3]
+			offset = int(uint32(in[1]) | uint32(in[2])<<8)
+			length = 1 + int(in[0])>>2
 			s += 3
 
 		case tagCopy4:
-			offset = int(le.Load32(src, s+1))
-			length = 1 + int(src[s])>>2
+			in := src[s : s+5]
+			offset = int(uint32(in[1]) | uint32(in[2])<<8 | uint32(in[3])<<16 | uint32(in[4])<<24)
+			length = 1 + int(in[0])>>2
 			s += 5
 		}
 

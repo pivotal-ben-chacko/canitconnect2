@@ -39,7 +39,6 @@ type SessionContext struct {
 		SessionKey []byte
 		IV         []byte
 	}
-	isRedirect bool
 }
 
 func NewSessionContext(config *configurations.ConnectionConfig) *SessionContext {

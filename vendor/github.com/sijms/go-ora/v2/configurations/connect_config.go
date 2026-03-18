@@ -21,16 +21,10 @@ const (
 	STREAM LobFetch = 1
 )
 
-type KerberosAuthInterface interface {
-	Authenticate(server, service string) ([]byte, error)
-}
-
 type AdvNegoServiceInfo struct {
 	AuthService     []string
 	EncServiceLevel int
 	IntServiceLevel int
-	// Kerberos is an optional session-specific auth, which will be preferred over the global interface if present.
-	Kerberos KerberosAuthInterface
 }
 type ConnectionConfig struct {
 	ClientInfo
@@ -87,8 +81,7 @@ func ParseConfig(dsn string) (*ConnectionConfig, error) {
 	config := &ConnectionConfig{
 		PrefetchRows: 25,
 		SessionInfo: SessionInfo{
-			ConnectTimeout: time.Duration(60 * time.Second),
-			Timeout:        0,
+			Timeout: time.Second * time.Duration(10*60), // 10 minutes
 			// TransportDataUnitSize: 0xFFFF,
 			// SessionDataUnitSize:   0xFFFF,
 			TransportDataUnitSize: 0x200000,
@@ -240,22 +233,14 @@ func ParseConfig(dsn string) (*ConnectionConfig, error) {
 			config.DBAPrivilege = DBAPrivilegeFromString(val[0])
 		case "TIMEOUT":
 			fallthrough
-		case "READ TIMEOUT":
-			fallthrough
-		case "SOCKET TIMEOUT":
-			to, err := strconv.Atoi(val[0])
-			if err != nil {
-				return nil, errors.New("TIMEOUT value must be an integer")
-			}
-			config.SessionInfo.Timeout = time.Second * time.Duration(to)
 		case "CONNECT TIMEOUT":
 			fallthrough
 		case "CONNECTION TIMEOUT":
 			to, err := strconv.Atoi(val[0])
 			if err != nil {
-				return nil, errors.New("TIMEOUT value must be an integer")
+				return nil, errors.New("CONNECTION TIMEOUT value must be an integer")
 			}
-			config.SessionInfo.ConnectTimeout = time.Second * time.Duration(to)
+			config.SessionInfo.Timeout = time.Second * time.Duration(to)
 		case "TRACE FILE":
 			config.TraceFilePath = val[0]
 			// if len(val[0]) > 0 {

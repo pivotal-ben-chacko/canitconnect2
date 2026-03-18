@@ -2,7 +2,6 @@ package go_ora
 
 import (
 	"database/sql/driver"
-	"github.com/sijms/go-ora/v2/network"
 
 	"github.com/sijms/go-ora/v2/configurations"
 )
@@ -91,9 +90,6 @@ func (cursor *RefCursor) load() error {
 	if err != nil {
 		return err
 	}
-	if cursor.cursorID == 0 {
-		return network.NewOracleError(1001)
-	}
 	return nil
 }
 
@@ -113,11 +109,11 @@ func (cursor *RefCursor) _query() (*DataSet, error) {
 		return nil, err
 	}
 	dataSet := new(DataSet)
-	err = cursor.read(dataSet.currentResultSet())
+	err = cursor.read(dataSet)
 	if err != nil {
 		return nil, err
 	}
-	err = cursor.decodePrim(dataSet.currentResultSet())
+	err = cursor.decodePrim(dataSet)
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +122,6 @@ func (cursor *RefCursor) _query() (*DataSet, error) {
 
 func (cursor *RefCursor) Query() (*DataSet, error) {
 	if cursor.connection.State != Opened {
-		cursor.connection.setBad()
 		return nil, driver.ErrBadConn
 	}
 	tracer := cursor.connection.tracer
@@ -159,9 +154,4 @@ func (cursor *RefCursor) write() error {
 		return err
 	}
 	return cursor.connection.session.Write()
-}
-
-func (cursor RefCursor) SetDataType(conn *Connection, par *ParameterInfo) error {
-	par.DataType = REFCURSOR
-	return nil
 }

@@ -15,7 +15,6 @@ type DialerContext interface {
 
 type SessionInfo struct {
 	SSLVersion            string
-	ConnectTimeout        time.Duration
 	Timeout               time.Duration
 	EnableOOB             bool
 	UnixAddress           string

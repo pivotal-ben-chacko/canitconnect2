@@ -8,10 +8,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9/internal"
-	"github.com/redis/go-redis/v9/internal/otel"
 	"github.com/redis/go-redis/v9/internal/pool"
 	"github.com/redis/go-redis/v9/internal/proto"
-	"github.com/redis/go-redis/v9/push"
 )
 
 // PubSub implements Pub/Sub commands as described in
@@ -23,7 +21,7 @@ import (
 type PubSub struct {
 	opt *Options
 
-	newConn   func(ctx context.Context, addr string, channels []string) (*pool.Conn, error)
+	newConn   func(ctx context.Context, channels []string) (*pool.Conn, error)
 	closeConn func(*pool.Conn) error
 
 	mu        sync.Mutex
@@ -40,12 +38,6 @@ type PubSub struct {
 	chOnce sync.Once
 	msgCh  *channel
 	allCh  *channel
-
-	// Push notification processor for handling generic push notifications
-	pushProcessor push.NotificationProcessor
-
-	// Cleanup callback for maintenanceNotifications upgrade tracking
-	onClose func()
 }
 
 func (c *PubSub) init() {
@@ -53,9 +45,6 @@ func (c *PubSub) init() {
 }
 
 func (c *PubSub) String() string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	channels := mapKeys(c.channels)
 	channels = append(channels, mapKeys(c.patterns)...)
 	channels = append(channels, mapKeys(c.schannels)...)
@@ -77,18 +66,10 @@ func (c *PubSub) conn(ctx context.Context, newChannels []string) (*pool.Conn, er
 		return c.cn, nil
 	}
 
-	if c.opt.Addr == "" {
-		// TODO(maintenanceNotifications):
-		// this is probably cluster client
-		// c.newConn will ignore the addr argument
-		// will be changed when we have maintenanceNotifications upgrades for cluster clients
-		c.opt.Addr = internal.RedisNull
-	}
-
 	channels := mapKeys(c.channels)
 	channels = append(channels, newChannels...)
 
-	cn, err := c.newConn(ctx, c.opt.Addr, channels)
+	cn, err := c.newConn(ctx, channels)
 	if err != nil {
 		return nil, err
 	}
@@ -169,31 +150,12 @@ func (c *PubSub) releaseConn(ctx context.Context, cn *pool.Conn, err error, allo
 	if c.cn != cn {
 		return
 	}
-
-	if !cn.IsUsable() || cn.ShouldHandoff() {
-		c.reconnect(ctx, fmt.Errorf("pubsub: connection is not usable"))
-	}
-
 	if isBadConn(err, allowTimeout, c.opt.Addr) {
 		c.reconnect(ctx, err)
 	}
 }
 
 func (c *PubSub) reconnect(ctx context.Context, reason error) {
-	if c.cn != nil && c.cn.ShouldHandoff() {
-		newEndpoint := c.cn.GetHandoffEndpoint()
-		// If new endpoint is NULL, use the original address
-		if newEndpoint == internal.RedisNull {
-			newEndpoint = c.opt.Addr
-		}
-
-		if newEndpoint != "" {
-			// Update the address in the options
-			oldAddr := c.cn.RemoteAddr().String()
-			c.opt.Addr = newEndpoint
-			internal.Logger.Printf(ctx, "pubsub: reconnecting to new endpoint %s (was %s)", newEndpoint, oldAddr)
-		}
-	}
 	_ = c.closeTheCn(reason)
 	_, _ = c.conn(ctx, nil)
 }
@@ -201,6 +163,9 @@ func (c *PubSub) reconnect(ctx context.Context, reason error) {
 func (c *PubSub) closeTheCn(reason error) error {
 	if c.cn == nil {
 		return nil
+	}
+	if !c.closed {
+		internal.Logger.Printf(c.getContext(), "redis: discarding bad PubSub connection: %s", reason)
 	}
 	err := c.closeConn(c.cn)
 	c.cn = nil
@@ -216,11 +181,6 @@ func (c *PubSub) Close() error {
 	}
 	c.closed = true
 	close(c.exit)
-
-	// Call cleanup callback if set
-	if c.onClose != nil {
-		c.onClose()
-	}
 
 	return c.closeTheCn(pool.ErrClosed)
 }
@@ -404,7 +364,7 @@ func (p *Pong) String() string {
 	return "Pong"
 }
 
-func (c *PubSub) newMessage(ctx context.Context, cn *pool.Conn, reply interface{}) (interface{}, error) {
+func (c *PubSub) newMessage(reply interface{}) (interface{}, error) {
 	switch reply := reply.(type) {
 	case string:
 		return &Pong{
@@ -421,42 +381,30 @@ func (c *PubSub) newMessage(ctx context.Context, cn *pool.Conn, reply interface{
 				Count:   int(reply[2].(int64)),
 			}, nil
 		case "message", "smessage":
-			channel := reply[1].(string)
-			sharded := kind == "smessage"
 			switch payload := reply[2].(type) {
 			case string:
-				msg := &Message{
-					Channel: channel,
+				return &Message{
+					Channel: reply[1].(string),
 					Payload: payload,
-				}
-				// Record PubSub message received
-				otel.RecordPubSubMessage(ctx, cn, "received", channel, sharded)
-				return msg, nil
+				}, nil
 			case []interface{}:
 				ss := make([]string, len(payload))
 				for i, s := range payload {
 					ss[i] = s.(string)
 				}
-				msg := &Message{
-					Channel:      channel,
+				return &Message{
+					Channel:      reply[1].(string),
 					PayloadSlice: ss,
-				}
-				// Record PubSub message received
-				otel.RecordPubSubMessage(ctx, cn, "received", channel, sharded)
-				return msg, nil
+				}, nil
 			default:
 				return nil, fmt.Errorf("redis: unsupported pubsub message payload: %T", payload)
 			}
 		case "pmessage":
-			channel := reply[2].(string)
-			msg := &Message{
+			return &Message{
 				Pattern: reply[1].(string),
-				Channel: channel,
+				Channel: reply[2].(string),
 				Payload: reply[3].(string),
-			}
-			// Record PubSub message received (pattern message, not sharded)
-			otel.RecordPubSubMessage(ctx, cn, "received", channel, false)
-			return msg, nil
+			}, nil
 		case "pong":
 			return &Pong{
 				Payload: reply[1].(string),
@@ -478,38 +426,28 @@ func (c *PubSub) ReceiveTimeout(ctx context.Context, timeout time.Duration) (int
 	}
 
 	// Don't hold the lock to allow subscriptions and pings.
+
 	cn, err := c.connWithLock(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	err = cn.WithReader(ctx, timeout, func(rd *proto.Reader) error {
-		// To be sure there are no buffered push notifications, we process them before reading the reply
-		if err := c.processPendingPushNotificationWithReader(ctx, cn, rd); err != nil {
-			// Log the error but don't fail the command execution
-			// Push notification processing errors shouldn't break normal Redis operations
-			internal.Logger.Printf(ctx, "push: conn[%d] error processing pending notifications before reading reply: %v", cn.GetID(), err)
-		}
+	err = cn.WithReader(context.Background(), timeout, func(rd *proto.Reader) error {
 		return c.cmd.readReply(rd)
 	})
+
 	c.releaseConnWithLock(ctx, cn, err, timeout > 0)
 
 	if err != nil {
 		return nil, err
 	}
 
-	return c.newMessage(ctx, cn, c.cmd.Val())
+	return c.newMessage(c.cmd.Val())
 }
 
 // Receive returns a message as a Subscription, Message, Pong or error.
 // See PubSub example for details. This is low-level API and in most cases
 // Channel should be used instead.
-// Receive returns a message as a Subscription, Message, Pong, or an error.
-// See PubSub example for details. This is a low-level API and in most cases
-// Channel should be used instead.
-// This method blocks until a message is received or an error occurs.
-// It may return early with an error if the context is canceled, the connection fails,
-// or other internal errors occur.
 func (c *PubSub) Receive(ctx context.Context) (interface{}, error) {
 	return c.ReceiveTimeout(ctx, 0)
 }
@@ -589,27 +527,6 @@ func (c *PubSub) ChannelWithSubscriptions(opts ...ChannelOption) <-chan interfac
 		panic(err)
 	}
 	return c.allCh.allCh
-}
-
-func (c *PubSub) processPendingPushNotificationWithReader(ctx context.Context, cn *pool.Conn, rd *proto.Reader) error {
-	// Only process push notifications for RESP3 connections with a processor
-	if c.opt.Protocol != 3 || c.pushProcessor == nil {
-		return nil
-	}
-
-	// Create handler context with client, connection pool, and connection information
-	handlerCtx := c.pushNotificationHandlerContext(cn)
-	return c.pushProcessor.ProcessPendingNotifications(ctx, handlerCtx, rd)
-}
-
-func (c *PubSub) pushNotificationHandlerContext(cn *pool.Conn) push.NotificationHandlerContext {
-	// PubSub doesn't have a client or connection pool, so we pass nil for those
-	// PubSub connections are blocking
-	return push.NotificationHandlerContext{
-		PubSub:     c,
-		Conn:       cn,
-		IsBlocking: true,
-	}
 }
 
 type ChannelOption func(c *channel)
@@ -747,7 +664,7 @@ func (c *channel) initMsgChan() {
 					}
 				case <-timer.C:
 					internal.Logger.Printf(
-						ctx, "redis: %v channel is full for %s (message is dropped)",
+						ctx, "redis: %s channel is full for %s (message is dropped)",
 						c, c.chanSendTimeout)
 				}
 			default:
@@ -801,7 +718,7 @@ func (c *channel) initAllChan() {
 					}
 				case <-timer.C:
 					internal.Logger.Printf(
-						ctx, "redis: %v channel is full for %s (message is dropped)",
+						ctx, "redis: %s channel is full for %s (message is dropped)",
 						c, c.chanSendTimeout)
 				}
 			default:

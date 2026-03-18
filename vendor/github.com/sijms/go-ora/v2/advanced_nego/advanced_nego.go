@@ -13,8 +13,9 @@ import (
 
 var version = 0xB200200
 
-// KerberosAuthInterface is an alias for configurations.KerberosAuthInterface, maintained for backwards compatibility.
-type KerberosAuthInterface = configurations.KerberosAuthInterface
+type KerberosAuthInterface interface {
+	Authenticate(server, service string) ([]byte, error)
+}
 
 var kerberosAuth KerberosAuthInterface = nil
 
@@ -170,17 +171,9 @@ func (nego *AdvNego) Read() error {
 		}
 	}
 	if authKerberos {
-		// Validate configuration
-		if kerberosAuth == nil && nego.negoInfo.Kerberos == nil {
-			return fmt.Errorf("advanced negotiation error: Kerberos authenticator not set; call SetKerberosAuth to set it globally or WithKerberosAuth to set it per session")
+		if kerberosAuth == nil {
+			return errors.New("advanced negotiation error: you need to call SetKerberosAuth with valid interface before use kerberos5 authentication")
 		}
-
-		// Prefer session-specific Kerberos auth object
-		auth := nego.negoInfo.Kerberos
-		if auth == nil {
-			auth = kerberosAuth
-		}
-
 		if authServ, ok := nego.serviceList[1].(*authService); ok {
 			authServ.writeHeader(4)
 			nego.comm.writeVersion(authServ.getVersion())
@@ -191,7 +184,7 @@ func (nego *AdvNego) Read() error {
 			if err != nil {
 				return err
 			}
-			return nego.kerberosHandshake(auth, authServ)
+			return nego.kerberosHandshake(authServ)
 		}
 	}
 	if authNTS {
@@ -280,7 +273,7 @@ func (nego *AdvNego) StartServices() error {
 	return nil
 }
 
-func (nego *AdvNego) kerberosHandshake(kerberos KerberosAuthInterface, authServ *authService) error {
+func (nego *AdvNego) kerberosHandshake(authServ *authService) error {
 	header, err := nego.readHeader()
 	if err != nil {
 		return err
@@ -308,7 +301,7 @@ func (nego *AdvNego) kerberosHandshake(kerberos KerberosAuthInterface, authServ 
 	if len(serverHostName) == 0 {
 		return errors.New("kerberos negotiation error: Server hostname not received")
 	}
-	ticketData, err := kerberos.Authenticate(serverHostName, serviceName)
+	ticketData, err := kerberosAuth.Authenticate(serverHostName, serviceName)
 	if err != nil {
 		return err
 	}
@@ -319,7 +312,7 @@ func (nego *AdvNego) kerberosHandshake(kerberos KerberosAuthInterface, authServ 
 	}
 	// if address is ipv6 then num1 = 24 otherwise = 2
 	num1 := 2
-	//localAddress = net.IP{172, 17, 0, 2}
+	localAddress = net.IP{172, 17, 0, 2}
 	if len(localAddress) > 4 {
 		num1 = 24
 	}
@@ -352,7 +345,8 @@ func (nego *AdvNego) kerberosHandshake(kerberos KerberosAuthInterface, authServ 
 			return err
 		}
 		if serviceHeader[2] != 0 {
-			return network.NewOracleError(serviceHeader[2])
+			return &network.OracleError{ErrCode: serviceHeader[2]}
+			// return fmt.Errorf("advanced negotiation error: during receive service header: network exception: ora-%d", serviceHeader[2])
 		}
 	}
 	// get packet header (2)

@@ -1,16 +1,16 @@
 package pq
 
+// Package pq is a pure Go Postgres driver for the database/sql package.
+// This module contains support for Postgres LISTEN/NOTIFY.
+
 import (
 	"context"
 	"database/sql/driver"
 	"errors"
 	"fmt"
-	"net"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/lib/pq/internal/proto"
 )
 
 // Notification represents a single notification from the database.
@@ -93,7 +93,7 @@ const (
 )
 
 type message struct {
-	typ proto.ResponseCode
+	typ byte
 	err error
 }
 
@@ -102,13 +102,19 @@ var errListenerConnClosed = errors.New("pq: ListenerConn has been closed")
 // ListenerConn is a low-level interface for waiting for notifications.  You
 // should use Listener instead.
 type ListenerConn struct {
-	connectionLock   sync.Mutex // guards cn and err
-	senderLock       sync.Mutex // the sending goroutine will be holding this lock
-	cn               *conn
-	err              error
-	connState        int32
+	// guards cn and err
+	connectionLock sync.Mutex
+	cn             *conn
+	err            error
+
+	connState int32
+
+	// the sending goroutine will be holding this lock
+	senderLock sync.Mutex
+
 	notificationChan chan<- *Notification
-	replyChan        chan message
+
+	replyChan chan message
 }
 
 // NewListenerConn creates a new ListenerConn. Use NewListener instead.
@@ -183,6 +189,8 @@ func (l *ListenerConn) setState(newState int32) bool {
 // away or should be discarded because we couldn't agree on the state with the
 // server backend.
 func (l *ListenerConn) listenerConnLoop() (err error) {
+	defer errRecoverNoErrBadConn(&err)
+
 	r := &readBuf{}
 	for {
 		t, err := l.cn.recvMessage(r)
@@ -191,43 +199,43 @@ func (l *ListenerConn) listenerConnLoop() (err error) {
 		}
 
 		switch t {
-		case proto.NotificationResponse:
+		case 'A':
 			// recvNotification copies all the data so we don't need to worry
 			// about the scratch buffer being overwritten.
 			l.notificationChan <- recvNotification(r)
 
-		case proto.RowDescription, proto.DataRow:
+		case 'T', 'D':
 			// only used by tests; ignore
 
-		case proto.ErrorResponse:
+		case 'E':
 			// We might receive an ErrorResponse even when not in a query; it
 			// is expected that the server will close the connection after
 			// that, but we should make sure that the error we display is the
 			// one from the stray ErrorResponse, not io.ErrUnexpectedEOF.
 			if !l.setState(connStateExpectReadyForQuery) {
-				return parseError(r, "")
+				return parseError(r)
 			}
-			l.replyChan <- message{t, parseError(r, "")}
+			l.replyChan <- message{t, parseError(r)}
 
-		case proto.CommandComplete, proto.EmptyQueryResponse:
+		case 'C', 'I':
 			if !l.setState(connStateExpectReadyForQuery) {
 				// protocol out of sync
 				return fmt.Errorf("unexpected CommandComplete")
 			}
 			// ExecSimpleQuery doesn't need to know about this message
 
-		case proto.ReadyForQuery:
+		case 'Z':
 			if !l.setState(connStateIdle) {
 				// protocol out of sync
 				return fmt.Errorf("unexpected ReadyForQuery")
 			}
 			l.replyChan <- message{t, nil}
 
-		case proto.ParameterStatus:
+		case 'S':
 			// ignore
-		case proto.NoticeResponse:
+		case 'N':
 			if n := l.cn.noticeHandler; n != nil {
-				n(parseError(r, ""))
+				n(parseError(r))
 			}
 		default:
 			return fmt.Errorf("unexpected message %q from server in listenerConnLoop", t)
@@ -254,7 +262,7 @@ func (l *ListenerConn) listenerConnMain() {
 	if l.err == nil {
 		l.err = err
 	}
-	_ = l.cn.Close()
+	l.cn.Close()
 	l.connectionLock.Unlock()
 
 	// There might be a query in-flight; make sure nobody's waiting for a
@@ -282,14 +290,15 @@ func (l *ListenerConn) UnlistenAll() (bool, error) {
 	return l.ExecSimpleQuery("UNLISTEN *")
 }
 
-// Ping the remote server to make sure it's alive. Non-nil error means the
+// Ping the remote server to make sure it's alive.  Non-nil error means the
 // connection has failed and should be abandoned.
 func (l *ListenerConn) Ping() error {
 	sent, err := l.ExecSimpleQuery("")
 	if !sent {
 		return err
 	}
-	if err != nil { // shouldn't happen
+	if err != nil {
+		// shouldn't happen
 		panic(err)
 	}
 	return nil
@@ -300,9 +309,11 @@ func (l *ListenerConn) Ping() error {
 // The caller must be holding senderLock (see acquireSenderLock and
 // releaseSenderLock).
 func (l *ListenerConn) sendSimpleQuery(q string) (err error) {
-	// Must set connection state before sending the query
+	defer errRecoverNoErrBadConn(&err)
+
+	// must set connection state before sending the query
 	if !l.setState(connStateExpectResponse) {
-		return errors.New("pq: two queries running at the same time")
+		panic("two queries running at the same time")
 	}
 
 	// Can't use l.cn.writeBuf here because it uses the scratch buffer which
@@ -312,16 +323,18 @@ func (l *ListenerConn) sendSimpleQuery(q string) (err error) {
 		pos: 1,
 	}
 	b.string(q)
-	return l.cn.send(b)
+	l.cn.send(b)
+
+	return nil
 }
 
 // ExecSimpleQuery executes a "simple query" (i.e. one with no bindable
 // parameters) on the connection. The possible return values are:
-//  1. "executed" is true; the query was executed to completion on the
-//     database server.  If the query failed, err will be set to the error
-//     returned by the database, otherwise err will be nil.
-//  2. If "executed" is false, the query could not be executed on the remote
-//     server.  err will be non-nil.
+//   1) "executed" is true; the query was executed to completion on the
+//      database server.  If the query failed, err will be set to the error
+//      returned by the database, otherwise err will be nil.
+//   2) If "executed" is false, the query could not be executed on the remote
+//      server.  err will be non-nil.
 //
 // After a call to ExecSimpleQuery has returned an executed=false value, the
 // connection has either been closed or will be closed shortly thereafter, and
@@ -343,7 +356,7 @@ func (l *ListenerConn) ExecSimpleQuery(q string) (executed bool, err error) {
 			l.err = err
 		}
 		l.connectionLock.Unlock()
-		_ = l.cn.c.Close()
+		l.cn.c.Close()
 		return false, err
 	}
 
@@ -359,7 +372,7 @@ func (l *ListenerConn) ExecSimpleQuery(q string) (executed bool, err error) {
 			return false, err
 		}
 		switch m.typ {
-		case proto.ReadyForQuery:
+		case 'Z':
 			// sanity check
 			if m.err != nil {
 				panic("m.err != nil")
@@ -367,7 +380,7 @@ func (l *ListenerConn) ExecSimpleQuery(q string) (executed bool, err error) {
 			// done; err might or might not be set
 			return true, err
 
-		case proto.ErrorResponse:
+		case 'E':
 			// sanity check
 			if m.err == nil {
 				panic("m.err == nil")
@@ -400,6 +413,8 @@ func (l *ListenerConn) Close() error {
 func (l *ListenerConn) Err() error {
 	return l.err
 }
+
+var errListenerClosed = errors.New("pq: Listener has been closed")
 
 // ErrChannelAlreadyOpen is returned from Listen when a channel is already
 // open.
@@ -526,12 +541,12 @@ func (l *Listener) NotificationChannel() <-chan *Notification {
 // connection can not be re-established.
 //
 // Listen will only fail in three conditions:
-//  1. The channel is already open.  The returned error will be
-//     ErrChannelAlreadyOpen.
-//  2. The query was executed on the remote server, but PostgreSQL returned an
-//     error message in response to the query.  The returned error will be a
-//     pq.Error containing the information the server supplied.
-//  3. Close is called on the Listener before the request could be completed.
+//   1) The channel is already open.  The returned error will be
+//      ErrChannelAlreadyOpen.
+//   2) The query was executed on the remote server, but PostgreSQL returned an
+//      error message in response to the query.  The returned error will be a
+//      pq.Error containing the information the server supplied.
+//   3) Close is called on the Listener before the request could be completed.
 //
 // The channel name is case-sensitive.
 func (l *Listener) Listen(channel string) error {
@@ -539,7 +554,7 @@ func (l *Listener) Listen(channel string) error {
 	defer l.lock.Unlock()
 
 	if l.isClosed {
-		return net.ErrClosed
+		return errListenerClosed
 	}
 
 	// The server allows you to issue a LISTEN on a channel which is already
@@ -570,7 +585,7 @@ func (l *Listener) Listen(channel string) error {
 		l.reconnectCond.Wait()
 		// we let go of the mutex for a while
 		if l.isClosed {
-			return net.ErrClosed
+			return errListenerClosed
 		}
 	}
 
@@ -589,7 +604,7 @@ func (l *Listener) Unlisten(channel string) error {
 	defer l.lock.Unlock()
 
 	if l.isClosed {
-		return net.ErrClosed
+		return errListenerClosed
 	}
 
 	// Similarly to LISTEN, this is not an error in Postgres, but it seems
@@ -623,7 +638,7 @@ func (l *Listener) UnlistenAll() error {
 	defer l.lock.Unlock()
 
 	if l.isClosed {
-		return net.ErrClosed
+		return errListenerClosed
 	}
 
 	if l.cn != nil {
@@ -648,7 +663,7 @@ func (l *Listener) Ping() error {
 	defer l.lock.Unlock()
 
 	if l.isClosed {
-		return net.ErrClosed
+		return errListenerClosed
 	}
 	if l.cn == nil {
 		return errors.New("no connection")
@@ -674,7 +689,7 @@ func (l *Listener) disconnectCleanup() error {
 	}
 
 	err := l.cn.Err()
-	_ = l.cn.Close()
+	l.cn.Close()
 	l.cn = nil
 	return err
 }
@@ -733,28 +748,25 @@ func (l *Listener) closed() bool {
 }
 
 func (l *Listener) connect() error {
+	notificationChan := make(chan *Notification, 32)
+	cn, err := newDialListenerConn(l.dialer, l.name, notificationChan)
+	if err != nil {
+		return err
+	}
+
 	l.lock.Lock()
 	defer l.lock.Unlock()
-	if l.isClosed {
-		return net.ErrClosed
-	}
 
-	notificationChan := make(chan *Notification, 32)
-
-	var err error
-	l.cn, err = newDialListenerConn(l.dialer, l.name, notificationChan)
+	err = l.resync(cn, notificationChan)
 	if err != nil {
+		cn.Close()
 		return err
 	}
 
-	err = l.resync(l.cn, notificationChan)
-	if err != nil {
-		_ = l.cn.Close()
-		return err
-	}
-
+	l.cn = cn
 	l.connNotificationChan = notificationChan
 	l.reconnectCond.Broadcast()
+
 	return nil
 }
 
@@ -766,11 +778,11 @@ func (l *Listener) Close() error {
 	defer l.lock.Unlock()
 
 	if l.isClosed {
-		return net.ErrClosed
+		return errListenerClosed
 	}
 
 	if l.cn != nil {
-		_ = l.cn.Close()
+		l.cn.Close()
 	}
 	l.isClosed = true
 

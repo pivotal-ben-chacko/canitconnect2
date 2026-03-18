@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"net"
 	"reflect"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -484,7 +483,7 @@ func (session *Session) BreakConnection() error {
 	// 		return nil, err
 	// 	}
 	// } else {
-	//
+	// 
 	// }
 	// ret := make([]PacketInterface, 0, 2)
 	// var pck PacketInterface
@@ -518,9 +517,9 @@ func (session *Session) Connect(ctx context.Context) error {
 	dialer := connOption.Dialer
 	if dialer == nil {
 		dialer = &net.Dialer{}
-		if session.Context.connConfig.ConnectTimeout > 0 {
+		if session.Context.connConfig.Timeout > 0 {
 			dialer = &net.Dialer{
-				Timeout: session.Context.connConfig.ConnectTimeout,
+				Timeout: session.Context.connConfig.Timeout,
 			}
 		} else {
 			dialer = &net.Dialer{}
@@ -601,7 +600,6 @@ func (session *Session) Connect(ctx context.Context) error {
 			return err
 		}
 		session.Context.connConfig.ResetServerIndex()
-		session.Context.isRedirect = true
 		return session.Connect(ctx)
 	}
 	if refusePacket, ok := pck.(*RefusePacket); ok {
@@ -616,7 +614,7 @@ func (session *Session) Connect(ctx context.Context) error {
 		host = connOption.GetActiveServer(true)
 		if host == nil {
 			session.Disconnect()
-			return refusePacket.Err
+			return &refusePacket.Err
 		}
 		return session.Connect(ctx)
 	}
@@ -725,7 +723,7 @@ func (session *Session) processMarker() error {
 	// receive all packet until you get marker
 	// var pck PacketInterface = nil
 	// for pck == nil || pck.getPacketType() != MARKER {
-	//
+	// 
 	// 	if session.isFinalPacketRead {
 	// 		break
 	// 	}
@@ -944,7 +942,6 @@ func (session *Session) GetError() *OracleError {
 		} else {
 			err.ErrMsg = string(session.Summary.ErrorMessage)
 		}
-		err.errPos = session.Summary.errorPos
 	}
 	return err
 }
@@ -1348,7 +1345,7 @@ func (session *Session) readPacket() (PacketInterface, error) {
 		// 	default:
 		// 		return nil, errors.New(fmt.Sprintf("TTC error: received code %d during stmt reading", msg))
 		// 	}
-		//
+		// 
 		// }
 		// fallthrough
 	default:
@@ -1603,9 +1600,6 @@ func (session *Session) GetInt64(size int, compress bool, bigEndian bool) (int64
 	}
 	if size == 0 {
 		return 0, nil
-	} else if size > 8 {
-		// When compress is true, "size" may be a value greater than 8 in some cases
-		return 0, errors.New("invalid size for GetInt64: " + strconv.Itoa(size))
 	}
 	rb, err := session.read(size)
 	if err != nil {
@@ -1712,7 +1706,7 @@ func (session *Session) GetClr() (output []byte, err error) {
 	// 	output, err = session.read(int(size))
 	// 	return
 	// }
-	//
+	// 
 	// for {
 	// 	var size1 int
 	// 	if session.UseBigClrChunks {
@@ -2001,18 +1995,18 @@ func (session *Session) WriteKeyVal(buffer *bytes.Buffer, key []byte, val []byte
 // 	}
 // 	return ret, nil
 // }
-//
+// 
 // func (session *Session) ReadInt(buffer *bytes.Buffer, size int, compress, bigEndian bool) (int, error) {
 // 	temp, err := session.ReadInt64(buffer, size, compress, bigEndian)
 // 	return int(temp), err
 // }
-//
+// 
 // func (session *Session) ReadBytes(buffer *bytes.Buffer, size int) ([]byte, error) {
 // 	temp := make([]byte, size)
 // 	_, err := buffer.Read(temp)
 // 	return temp, err
 // }
-//
+// 
 // func (session *Session)ReadClr(buffer *bytes.Buffer) (output []byte, err error){
 // 	var size uint8
 // 	var rb []byte
@@ -2049,7 +2043,7 @@ func (session *Session) WriteKeyVal(buffer *bytes.Buffer, key []byte, val []byte
 // 	output = tempBuffer.Bytes()
 // 	return
 // }
-//
+// 
 // func (session *Session)ReadDlc(buffer *bytes.Buffer) (output []byte, err error) {
 // 	var length int
 // 	length, err = session.ReadInt(buffer, 4, true, true)

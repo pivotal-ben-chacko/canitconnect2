@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"github.com/sijms/go-ora/v2/converters"
 	"math"
 	"reflect"
 	"strconv"
@@ -15,11 +14,6 @@ type Number struct {
 	data []byte
 }
 
-func (num Number) SetDataType(conn *Connection, par *ParameterInfo) error {
-	par.DataType = NUMBER
-	par.MaxLen = converters.MAX_LEN_NUMBER
-	return nil
-}
 func (num *Number) isZero() bool {
 	return len(num.data) > 0 && num.data[0] == 0x80
 }
@@ -191,10 +185,6 @@ func (num *Number) decode() (strNum string, exp int, negative bool, err error) {
 	}
 
 	buf := num.data[1:]
-	if len(buf) == 0 {
-		err = fmt.Errorf("invalid NUMBER")
-		return
-	}
 	if negative && buf[len(buf)-1] == 0x66 {
 		buf = buf[:len(buf)-1]
 	}

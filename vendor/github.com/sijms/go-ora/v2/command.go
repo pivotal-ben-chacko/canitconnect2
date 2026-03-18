@@ -31,10 +31,10 @@ const (
 type StmtInterface interface {
 	hasMoreRows() bool
 	noOfRowsToFetch() int
-	fetch(resultSet *ResultSet) error
+	fetch(dataSet *DataSet) error
 	hasBLOB() bool
 	hasLONG() bool
-	read(resultSet *ResultSet) error
+	read(dataSet *DataSet) error
 	Close() error
 	CanAutoClose() bool
 }
@@ -57,7 +57,6 @@ type defaultStmt struct {
 	containOutputPars bool
 	autoClose         bool
 	temporaryLobs     [][]byte
-	multiSet          []RefCursor
 }
 
 func (stmt *defaultStmt) CanAutoClose() bool {
@@ -244,13 +243,13 @@ func (stmt *defaultStmt) writeDefine() error {
 		col.Precision = 0
 		col.Scale = 0
 		col.MaxCharLen = 0
-		if col.DataType == OCIBlobLocator || col.DataType == OCIClobLocator || col.DataType == VECTOR {
+		if col.DataType == OCIBlobLocator || col.DataType == OCIClobLocator {
 			num = 0
 			// temp.ContFlag |= 0x2000000
 			if stmt.connection.connOption.Lob == configurations.INLINE && !col.IsJson {
 				num = 0x3FFFFFFF
 				// col.MaxCharLen = 0
-				if col.DataType == OCIBlobLocator || col.DataType == VECTOR {
+				if col.DataType == OCIBlobLocator {
 					col.DataType = LongRaw
 					// change data type in the original array
 					stmt.columns[index].DataType = LongRaw
@@ -329,11 +328,12 @@ func NewStmt(text string, conn *Connection) *Stmt {
 	if strings.HasPrefix(uCmdText, "SELECT") || strings.HasPrefix(uCmdText, "WITH") {
 		stmt.stmtType = SELECT
 	} else if strings.HasPrefix(uCmdText, "INSERT") ||
-		strings.HasPrefix(uCmdText, "MERGE") ||
-		strings.HasPrefix(uCmdText, "UPDATE") ||
-		strings.HasPrefix(uCmdText, "DELETE") {
+		strings.HasPrefix(uCmdText, "MERGE") {
 		stmt.stmtType = DML
 		stmt.bulkExec = true
+	} else if strings.HasPrefix(uCmdText, "UPDATE") ||
+		strings.HasPrefix(uCmdText, "DELETE") {
+		stmt.stmtType = DML
 	} else if strings.HasPrefix(uCmdText, "DECLARE") || strings.HasPrefix(uCmdText, "BEGIN") {
 		stmt.stmtType = PLSQL
 	} else {
@@ -365,7 +365,7 @@ func (stmt *Stmt) writePars() error {
 		if !par.isLongType() {
 			if par.DataType == REFCURSOR {
 				session.WriteBytes(&buffer, 1, 0)
-			} else if (par.Direction == Input || par.Direction == InOut) && par.isLobType() {
+			} else if par.Direction == Input && par.isLobType() {
 				if len(par.BValue) > 0 {
 					session.WriteUint(&buffer, len(par.BValue), 2, true, true)
 				}
@@ -598,7 +598,7 @@ func (stmt *Stmt) getExeOption() int {
 }
 
 // fetch get more rows from network stream
-func (stmt *defaultStmt) fetch(resultSet *ResultSet) error {
+func (stmt *defaultStmt) fetch(dataSet *DataSet) error {
 	if stmt._noOfRowsToFetch == 25 {
 		// m_maxRowSize = m_maxRowSize + m_numOfLOBColumns * Math.Max(86, 86 + (int) lobSize) + m_numOfLONGColumns * Math.Max(2, longSize) + m_numOfBFileColumns * 86;
 		maxRowSize := 0
@@ -618,7 +618,7 @@ func (stmt *defaultStmt) fetch(resultSet *ResultSet) error {
 	}
 
 	tracer := stmt.connection.tracer
-	err := stmt._fetch(resultSet)
+	err := stmt._fetch(dataSet)
 	if errors.Is(err, network.ErrConnReset) {
 		err = stmt.connection.read()
 		session := stmt.connection.session
@@ -649,7 +649,7 @@ func (stmt *defaultStmt) fetch(resultSet *ResultSet) error {
 	return nil
 }
 
-func (stmt *defaultStmt) _fetch(resultSet *ResultSet) error {
+func (stmt *defaultStmt) _fetch(dataSet *DataSet) error {
 	session := stmt.connection.session
 	// defer func() {
 	// 	err := stmt.freeTemporaryLobs()
@@ -665,18 +665,18 @@ func (stmt *defaultStmt) _fetch(resultSet *ResultSet) error {
 	if err != nil {
 		return err
 	}
-	err = stmt.read(resultSet)
+	err = stmt.read(dataSet)
 	if err != nil {
 		return err
 	}
 	//if stmt.connection.connOption.Lob > configurations.INLINE {
 	//
 	//}
-	return stmt.decodePrim(resultSet)
+	return stmt.decodePrim(dataSet)
 	// return nil
 }
 
-func (stmt *defaultStmt) queryLobPrefetch(exeOp int, resultSet *ResultSet) error {
+func (stmt *defaultStmt) queryLobPrefetch(exeOp int, dataSet *DataSet) error {
 	if stmt._noOfRowsToFetch == 25 {
 		// m_maxRowSize = m_maxRowSize + m_numOfLOBColumns * Math.Max(86, 86 + (int) lobSize) + m_numOfLONGColumns * Math.Max(2, longSize) + m_numOfBFileColumns * 86;
 		maxRowSize := 0
@@ -707,17 +707,17 @@ func (stmt *defaultStmt) queryLobPrefetch(exeOp int, resultSet *ResultSet) error
 	if err != nil {
 		return err
 	}
-	return stmt.read(resultSet)
+	return stmt.read(dataSet)
 }
 
 // read this is common read for stmt it read much information related to
 // columns, dataset information, output parameter information, rows values
 // and at the end summary object about this operation
-func (stmt *defaultStmt) read(resultSet *ResultSet) (err error) {
+func (stmt *defaultStmt) read(dataSet *DataSet) (err error) {
 	loop := true
 	after7 := false
-	resultSet.parent = stmt
-	resultSet.cols = &stmt.columns
+	dataSet.parent = stmt
+	dataSet.cols = &stmt.columns
 	session := stmt.connection.session
 	defer func() {
 		if session.Summary != nil {
@@ -727,6 +727,38 @@ func (stmt *defaultStmt) read(resultSet *ResultSet) (err error) {
 			}
 		}
 	}()
+	// defer func() {
+	// 	if _, ok := recover().(*network.ErrConnReset); ok {
+	// 		loop = true
+	// 		var msg uint8
+	// 		for loop {
+	// 			msg, err = session.GetByte()
+	// 			if err != nil {
+	// 				return
+	// 			}
+	// 			err = stmt.connection.readMsg(msg)
+	// 			if err != nil {
+	// 				return
+	// 			}
+	// 			if msg == 4 {
+	// 				stmt.cursorID = stmt.connection.session.Summary.CursorID
+	// 				if stmt.connection.session.HasError() {
+	// 					if stmt.connection.session.Summary.RetCode == 1403 {
+	// 						stmt._hasMoreRows = false
+	// 						stmt.connection.session.Summary = nil
+	// 					} else {
+	// 						err = stmt.connection.session.GetError()
+	// 						return
+	// 					}
+	//
+	// 				}
+	// 				loop = false
+	// 			} else if msg == 9 {
+	// 				loop = false
+	// 			}
+	// 		}
+	// 	}
+	// }()
 	for loop {
 		msg, err := session.GetByte()
 		if err != nil {
@@ -735,7 +767,7 @@ func (stmt *defaultStmt) read(resultSet *ResultSet) (err error) {
 		switch msg {
 		case 6:
 			// _, err = session.GetByte()
-			err = resultSet.load(session)
+			err = dataSet.load(session)
 			if err != nil {
 				return err
 			}
@@ -807,7 +839,13 @@ func (stmt *defaultStmt) read(resultSet *ResultSet) (err error) {
 						}
 					}
 				} else {
-					newRow := make(Row, resultSet.columnCount)
+					// see if it is re-executed
+					// if len(dataSet.Cols) == 0 && len(stmt.columns) > 0 {
+					//
+					// }
+					// dataSet.Cols = make([]ParameterInfo, len(stmt.columns))
+					// copy(dataSet.Cols, stmt.columns)
+					newRow := make(Row, dataSet.columnCount)
 					for index, col := range stmt.columns {
 						if col.getDataFromServer {
 							err = stmt.calculateColumnValue(&col, false)
@@ -828,7 +866,8 @@ func (stmt *defaultStmt) read(resultSet *ResultSet) (err error) {
 						}
 						newRow[index] = col.oPrimValue
 					}
-					resultSet.rows = append(resultSet.rows, newRow)
+					// copy(newRow, dataSet.currentRow)
+					dataSet.rows = append(dataSet.rows, newRow)
 				}
 			}
 		case 8:
@@ -896,12 +935,12 @@ func (stmt *defaultStmt) read(resultSet *ResultSet) (err error) {
 				}
 			}
 		case 11:
-			err = resultSet.load(session)
+			err = dataSet.load(session)
 			if err != nil {
 				return err
 			}
 			// dataSet.BindDirections = make([]byte, dataSet.columnCount)
-			for x := 0; x < resultSet.columnCount; x++ {
+			for x := 0; x < dataSet.columnCount; x++ {
 				direction, err := session.GetByte()
 				switch direction {
 				case 32:
@@ -926,19 +965,19 @@ func (stmt *defaultStmt) read(resultSet *ResultSet) (err error) {
 			if err != nil {
 				return err
 			}
-			resultSet.maxRowSize, err = session.GetInt(4, true, true)
+			dataSet.maxRowSize, err = session.GetInt(4, true, true)
 			if err != nil {
 				return err
 			}
-			resultSet.columnCount, err = session.GetInt(4, true, true)
+			dataSet.columnCount, err = session.GetInt(4, true, true)
 			if err != nil {
 				return err
 			}
-			if resultSet.columnCount > 0 {
+			if dataSet.columnCount > 0 {
 				_, err = session.GetByte() // session.GetInt(1, false, false)
 			}
-			stmt.columns = make([]ParameterInfo, resultSet.columnCount)
-			for x := 0; x < resultSet.columnCount; x++ {
+			stmt.columns = make([]ParameterInfo, dataSet.columnCount)
+			for x := 0; x < dataSet.columnCount; x++ {
 				err = stmt.columns[x].load(stmt.connection)
 				if err != nil {
 					return err
@@ -975,8 +1014,8 @@ func (stmt *defaultStmt) read(resultSet *ResultSet) (err error) {
 			if err != nil {
 				return err
 			}
-			bitVectorLen := resultSet.columnCount / 8
-			if resultSet.columnCount%8 > 0 {
+			bitVectorLen := dataSet.columnCount / 8
+			if dataSet.columnCount%8 > 0 {
 				bitVectorLen++
 			}
 			bitVector := make([]byte, bitVectorLen)
@@ -986,13 +1025,12 @@ func (stmt *defaultStmt) read(resultSet *ResultSet) (err error) {
 					return err
 				}
 			}
-			resultSet.setBitVector(bitVector)
+			dataSet.setBitVector(bitVector)
 		case 27:
 			count, err := session.GetInt(4, true, true)
 			if err != nil {
 				return err
 			}
-			stmt.multiSet = make([]RefCursor, 0, count)
 			for x := 0; x < count; x++ {
 				// refCursorAccessor.UnmarshalOneRow();
 				// this function is equal to load cursor so each item is a cursor
@@ -1004,17 +1042,8 @@ func (stmt *defaultStmt) read(resultSet *ResultSet) (err error) {
 				if err != nil {
 					return err
 				}
-
-				stmt.multiSet = append(stmt.multiSet, cursor)
 				// what we will do with cursor?
 			}
-			//for _, cursor := range cursors {
-			//	err = cursor.Close()
-			//	if err != nil {
-			//		return err
-			//	}
-			//}
-			//return errors.New("stmt read facing code: 27 (returning multiple ref cursor) still not implemented")
 			// internal List<TTCResultSet> ProcessImplicitResultSet(
 			// ref List<TTCResultSet> implicitRSList)
 			// {
@@ -1047,7 +1076,7 @@ func (stmt *defaultStmt) read(resultSet *ResultSet) (err error) {
 	// 	}
 	// }
 	if stmt.connection.tracer.IsOn() {
-		resultSet.Trace(stmt.connection.tracer)
+		dataSet.Trace(stmt.connection.tracer)
 	}
 	// return stmt.readLobs(dataSet)
 	return nil
@@ -1248,7 +1277,7 @@ func (stmt *Stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (dr
 	if errors.Is(err, network.ErrConnReset) {
 		if stmt._hasReturnClause {
 			dataSet := &DataSet{}
-			err = stmt.read(dataSet.currentResultSet())
+			err = stmt.read(dataSet)
 			if !errors.Is(err, network.ErrConnReset) {
 				if isBadConn(err) {
 					stmt.connection.setBad()
@@ -1378,7 +1407,10 @@ func (stmt *Stmt) structPar(parValue driver.Value, parIndex int) (processedPars 
 				fieldType = fieldType.Elem()
 			}
 		}
-
+		// if field is empty ptr create type
+		//if field.Kind() == reflect.Ptr  && field.IsNil() {
+		//	field.Set(reflect.New(fieldType))
+		//}
 		// if type mentioned so driver should create a temporary type and then update the current value
 		typeErr := fmt.Errorf("error passing filed %s as type %s", tempType.Field(fieldIndex).Name, _type)
 		switch _type {
@@ -1596,9 +1628,6 @@ func (stmt *Stmt) _exec(args []driver.NamedValue) (*QueryResult, error) {
 			if err != nil {
 				return nil, err
 			}
-		case *batch:
-			stmt.bulkExec = true
-			args[x].Value = tempOut.array
 		default:
 			processedPars := 0
 			processedPars, err = stmt.structPar(args[x].Value, parIndex)
@@ -1612,93 +1641,116 @@ func (stmt *Stmt) _exec(args []driver.NamedValue) (*QueryResult, error) {
 				structPars = append(structPars, args[x].Value)
 				continue
 			}
-		}
-		if stmt.bulkExec {
-			tempType := reflect.TypeOf(args[x].Value)
-			tempVal := reflect.ValueOf(args[x].Value)
-			if args[x].Value != nil && tempType != reflect.TypeOf([]byte{}) && (tempType.Kind() == reflect.Array || tempType.Kind() == reflect.Slice) {
-				// setup array count
-				if stmt.arrayBindCount == 0 {
-					stmt.arrayBindCount = tempVal.Len()
-				} else {
-					if stmt.arrayBindCount > tempVal.Len() {
+			if stmt.bulkExec {
+				tempType := reflect.TypeOf(args[x].Value)
+				tempVal := reflect.ValueOf(args[x].Value)
+				if args[x].Value != nil && tempType != reflect.TypeOf([]byte{}) && (tempType.Kind() == reflect.Array || tempType.Kind() == reflect.Slice) {
+					// setup array count
+					if stmt.arrayBindCount == 0 {
 						stmt.arrayBindCount = tempVal.Len()
-					}
-				}
-				// see if first item is struct
-				firstItem := tempVal.Index(0)
-				// lobData := make([]*Lob, stmt.arrayBindCount)
-				if firstItem.Kind() == reflect.Struct {
-					fieldCount := firstItem.NumField()
-					structArrayAsNamedPars := make([]driver.NamedValue, 0, fieldCount)
-					for fieldIndex := 0; fieldIndex < fieldCount; fieldIndex++ {
-						name, _type, _, _ := extractTag(firstItem.Type().Field(fieldIndex).Tag.Get("db"))
-						if name != "" {
-							arrayValues := make([]driver.Value, stmt.arrayBindCount)
-							for arrayIndex := 0; arrayIndex < stmt.arrayBindCount; arrayIndex++ {
-								var tempPar *ParameterInfo
-								tempPar, err = parseInputField(tempVal.Index(arrayIndex), name, _type, fieldIndex)
-								if err != nil {
-									return nil, err
-								}
-								arrayValues[arrayIndex] = tempPar.Value
-							}
-							structArrayAsNamedPars = append(structArrayAsNamedPars, driver.NamedValue{Name: name, Value: arrayValues})
+					} else {
+						if stmt.arrayBindCount > tempVal.Len() {
+							stmt.arrayBindCount = tempVal.Len()
 						}
 					}
-					if len(structArrayAsNamedPars) > 0 {
-						return stmt._exec(structArrayAsNamedPars)
+					// see if first item is struct
+					firstItem := tempVal.Index(0)
+					// lobData := make([]*Lob, stmt.arrayBindCount)
+					if firstItem.Kind() == reflect.Struct {
+						fieldCount := firstItem.NumField()
+						structArrayAsNamedPars := make([]driver.NamedValue, 0, fieldCount)
+						for fieldIndex := 0; fieldIndex < fieldCount; fieldIndex++ {
+							name, _type, _, _ := extractTag(firstItem.Type().Field(fieldIndex).Tag.Get("db"))
+							if name != "" {
+								arrayValues := make([]driver.Value, stmt.arrayBindCount)
+								for arrayIndex := 0; arrayIndex < stmt.arrayBindCount; arrayIndex++ {
+									var tempPar *ParameterInfo
+									tempPar, err = parseInputField(tempVal.Index(arrayIndex), name, _type, fieldIndex)
+									if err != nil {
+										return nil, err
+									}
+									arrayValues[arrayIndex] = tempPar.Value
+									// if (tempVal.Index(arrayIndex).Field(fieldIndex).Kind() == reflect.Ptr ||
+									// 	tempVal.Index(arrayIndex).Field(fieldIndex).Kind() == reflect.Slice ||
+									// 	tempVal.Index(arrayIndex).Field(fieldIndex).Kind() == reflect.Array) && tempVal.Index(arrayIndex).Field(fieldIndex).IsNil() {
+									// 	arrayValues[arrayIndex] = nil
+									// } else {
+									//
+									// }
+								}
+								structArrayAsNamedPars = append(structArrayAsNamedPars, driver.NamedValue{Name: name, Value: arrayValues})
+							}
+						}
+						if len(structArrayAsNamedPars) > 0 {
+							return stmt._exec(structArrayAsNamedPars)
+						}
 					}
-				}
-				par = &ParameterInfo{
-					Name:      args[x].Name,
-					Direction: Input,
-				}
-				maxLen := 0
-				maxCharLen := 0
-				dataType := TNSType(0)
-				arrayValues := make([][]byte, stmt.arrayBindCount)
-				for y := 0; y < stmt.arrayBindCount; y++ {
-					par.Value = tempVal.Index(y).Interface()
-					err = par.encodeValue(0, stmt.connection)
-					if err != nil {
-						return nil, err
+
+					// err := param.encodeValue(val, size, stmt.connection)
+					// if err != nil {
+					// 	return nil, err
+					// }
+					// return param, err
+					// par, err = stmt.NewParam(args[x].Name, firstItem.Interface(), 0, Input)
+					// if err != nil {
+					// 	return nil, err
+					// }
+
+					par = &ParameterInfo{
+						Name:      args[x].Name,
+						Direction: Input,
 					}
-					stmt.temporaryLobs = append(stmt.temporaryLobs, par.collectLocators()...)
-					if maxLen < par.MaxLen {
-						maxLen = par.MaxLen
+					// calculate maxLen, maxCharLen and DataType
+					// maxLen := par.MaxLen
+					// maxCharLen := par.MaxCharLen
+					// dataType := par.DataType
+					maxLen := 0
+					maxCharLen := 0
+					dataType := TNSType(0)
+					arrayValues := make([][]byte, stmt.arrayBindCount)
+					for y := 0; y < stmt.arrayBindCount; y++ {
+						par.Value = tempVal.Index(y).Interface()
+						err = par.encodeValue(0, stmt.connection)
+						if err != nil {
+							return nil, err
+						}
+						stmt.temporaryLobs = append(stmt.temporaryLobs, par.collectLocators()...)
+						if maxLen < par.MaxLen {
+							maxLen = par.MaxLen
+						}
+						if maxCharLen < par.MaxCharLen {
+							maxCharLen = par.MaxCharLen
+						}
+						// here I can take the binary value and store it into array
+						arrayValues[y] = par.BValue
+						if len(par.BValue) == 0 && par.DataType == NCHAR {
+							continue
+						}
+						dataType = par.DataType
 					}
-					if maxCharLen < par.MaxCharLen {
-						maxCharLen = par.MaxCharLen
+					// save arrayValues into primitive
+					par.iPrimValue = arrayValues
+					//_ = par.encodeValue(tempVal.Index(0).Interface(), 0, stmt.connection)
+					par.MaxLen = maxLen
+					par.MaxCharLen = maxCharLen
+					if int(dataType) == 0 {
+						dataType = NCHAR
 					}
-					// here I can take the binary value and store it into array
-					arrayValues[y] = par.BValue
-					if len(par.BValue) == 0 && par.DataType == NCHAR {
-						continue
+					par.DataType = dataType
+				} else {
+					if stmt.arrayBindCount > 0 {
+						return nil, errors.New("to activate bulk insert/merge all parameters should be arrays")
 					}
-					dataType = par.DataType
+					stmt.bulkExec = false
 				}
-				// save arrayValues into primitive
-				par.iPrimValue = arrayValues
-				//_ = par.encodeValue(tempVal.Index(0).Interface(), 0, stmt.connection)
-				par.MaxLen = maxLen
-				par.MaxCharLen = maxCharLen
-				if int(dataType) == 0 {
-					dataType = NCHAR
-				}
-				par.DataType = dataType
-			} else {
-				if stmt.arrayBindCount > 0 {
-					return nil, errors.New("to activate bulk insert/merge all parameters should be arrays")
-				}
-				stmt.bulkExec = false
 			}
-		}
-		if par == nil {
-			par, err = stmt.NewParam(args[x].Name, args[x].Value, 0, Input)
-			if err != nil {
-				return nil, err
+			if par == nil {
+				par, err = stmt.NewParam(args[x].Name, args[x].Value, 0, Input)
+				if err != nil {
+					return nil, err
+				}
 			}
+
 		}
 		if len(par.Name) == 0 && useNamedPars {
 			useNamedPars = false
@@ -1721,10 +1773,16 @@ func (stmt *Stmt) _exec(args []driver.NamedValue) (*QueryResult, error) {
 		return nil, err
 	}
 	dataSet := new(DataSet)
-	err = stmt.read(dataSet.currentResultSet())
+	err = stmt.read(dataSet)
 	if err != nil {
 		return nil, err
 	}
+	// need to deal with lobs
+	// err = stmt.readLobs(dataSet)
+	// if err != nil {
+	// 	return nil, err
+	// }
+
 	// before release results decode parameters
 	for _, par := range stmt.Pars {
 		if par.Direction != Input && par.DataType != REFCURSOR {
@@ -1775,7 +1833,7 @@ func (stmt *Stmt) useNamedParameters() error {
 		for x := 0; x < len(names); x++ {
 			found := false
 			for _, par := range stmt.Pars {
-				if strings.ToLower(par.Name) == strings.ToLower(names[x]) {
+				if par.Name == names[x] {
 					parCollection = append(parCollection, par)
 					found = true
 					break
@@ -1804,7 +1862,7 @@ func (stmt *Stmt) useNamedParameters() error {
 			}
 			found := false
 			for _, par := range stmt.Pars {
-				if strings.ToLower(par.Name) == strings.ToLower(names[x]) {
+				if par.Name == names[x] {
 					if !repeated {
 						parCollection = append(parCollection, par)
 					}
@@ -1861,10 +1919,7 @@ func (stmt *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 	return result, err
 }
 
-func (stmt *Stmt) CheckNamedValue(nv *driver.NamedValue) error {
-	if _, ok := nv.Value.(driver.Valuer); ok {
-		return driver.ErrSkip
-	}
+func (stmt *Stmt) CheckNamedValue(_ *driver.NamedValue) error {
 	return nil
 }
 
@@ -2012,21 +2067,9 @@ func (stmt *Stmt) _query() (*DataSet, error) {
 		return nil, err
 	}
 	dataSet = new(DataSet)
-	err = stmt.read(dataSet.currentResultSet())
+	err = stmt.read(dataSet)
 	if err != nil {
 		return nil, err
-	}
-	// deal with multiSet
-	if len(stmt.multiSet) > 0 {
-		for _, cursor := range stmt.multiSet {
-			tempSet, err := cursor.Query()
-			if err != nil {
-				return nil, err
-			}
-			dataSet.resultSets = append(dataSet.resultSets, tempSet.resultSets[0])
-		}
-		// bypass first resultset
-		dataSet.index++
 	}
 	// deal with lobs
 	if stmt.parse && (stmt._hasBLOB || stmt._hasLONG) && stmt.connection.connOption.Lob == configurations.INLINE {
@@ -2034,12 +2077,12 @@ func (stmt *Stmt) _query() (*DataSet, error) {
 		stmt.execute = false
 		stmt.parse = false
 		stmt.reSendParDef = false
-		err = stmt.queryLobPrefetch(stmt.getExeOption(), dataSet.currentResultSet())
+		err = stmt.queryLobPrefetch(stmt.getExeOption(), dataSet)
 		if err != nil {
 			return nil, err
 		}
 	}
-	err = stmt.decodePrim(dataSet.currentResultSet())
+	err = stmt.decodePrim(dataSet)
 	if err != nil {
 		return nil, err
 	}
@@ -2049,27 +2092,20 @@ func (stmt *Stmt) _query() (*DataSet, error) {
 	return dataSet, err
 }
 
-func (stmt *defaultStmt) decodePrim(resultSet *ResultSet) error {
+func (stmt *defaultStmt) decodePrim(dataSet *DataSet) error {
 	var err error
 	// convert from go-ora primitives to sql primitives
-	for rowIndex, row := range resultSet.rows {
+	for rowIndex, row := range dataSet.rows {
 		for colIndex, col := range stmt.columns {
 			if row == nil {
 				continue
 			}
 			switch val := row[colIndex].(type) {
 			case *RefCursor:
-				resultSet.rows[rowIndex][colIndex], err = val.Query()
+				dataSet.rows[rowIndex][colIndex], err = val.Query()
 				if err != nil {
 					return err
 				}
-			case Vector:
-				// read data from lob
-				err = val.load()
-				if err != nil {
-					return err
-				}
-				resultSet.rows[rowIndex][colIndex] = val.Data
 			case Lob:
 				if col.DataType == OCIClobLocator {
 					tempString := sql.NullString{String: "", Valid: false}
@@ -2078,9 +2114,9 @@ func (stmt *defaultStmt) decodePrim(resultSet *ResultSet) error {
 						return err
 					}
 					if tempString.Valid {
-						resultSet.rows[rowIndex][colIndex] = tempString.String
+						dataSet.rows[rowIndex][colIndex] = tempString.String
 					} else {
-						resultSet.rows[rowIndex][colIndex] = nil
+						dataSet.rows[rowIndex][colIndex] = nil
 					}
 				} else {
 					var tempByte []byte
@@ -2088,7 +2124,7 @@ func (stmt *defaultStmt) decodePrim(resultSet *ResultSet) error {
 					if err != nil {
 						return err
 					}
-					resultSet.rows[rowIndex][colIndex] = tempByte
+					dataSet.rows[rowIndex][colIndex] = tempByte
 				}
 			case []ParameterInfo:
 				if col.cusType != nil {
@@ -2097,7 +2133,7 @@ func (stmt *defaultStmt) decodePrim(resultSet *ResultSet) error {
 					if err != nil {
 						return err
 					}
-					resultSet.rows[rowIndex][colIndex] = tempObject.Elem().Interface()
+					dataSet.rows[rowIndex][colIndex] = tempObject.Elem().Interface()
 				}
 			}
 		}

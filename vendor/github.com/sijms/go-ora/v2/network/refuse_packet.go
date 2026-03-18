@@ -11,7 +11,7 @@ import (
 
 type RefusePacket struct {
 	Packet
-	Err          *OracleError
+	Err          OracleError
 	SystemReason uint8
 	UserReason   uint8
 	message      string
@@ -64,7 +64,9 @@ var codeExtractRegexp = go_ora.NewLazyInit(func() (interface{}, error) {
 
 func (pck *RefusePacket) extractErrCode() {
 	var err error
-	pck.Err = NewOracleError(12564)
+
+	pck.Err.ErrCode = 12564
+	pck.Err.ErrMsg = "ORA-12564: TNS connection refused"
 	if len(pck.message) == 0 {
 		return
 	}
@@ -84,7 +86,8 @@ func (pck *RefusePacket) extractErrCode() {
 	strErrCode := matches[1]
 	errCode, err := strconv.ParseInt(strErrCode, 10, 32)
 	if err == nil {
-		pck.Err = NewOracleError(int(errCode))
+		pck.Err.ErrCode = int(errCode)
+		pck.Err.translate()
 		return
 	}
 
@@ -114,6 +117,7 @@ func (pck *RefusePacket) extractErrCode() {
 	strErrCode = matches[1]
 	errCode, err = strconv.ParseInt(strErrCode, 10, 32)
 	if err == nil {
-		pck.Err = NewOracleError(int(errCode))
+		pck.Err.ErrCode = int(errCode)
+		pck.Err.translate()
 	}
 }
