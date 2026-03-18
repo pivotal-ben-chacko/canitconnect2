@@ -16,11 +16,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/gin-gonic/gin"
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
@@ -552,7 +550,7 @@ func handlePortScan(c *gin.Context) {
 }
 
 func handleS3(c *gin.Context, req DBCheckRequest) {
-	// For S3: Host = endpoint URL, Username = access key, Password = secret key, Database = bucket (optional)
+	// For S3: Host = endpoint, Username = access key, Password = secret key, Database = bucket (optional)
 	if req.Username == "" {
 		c.JSON(http.StatusBadRequest, CheckResponse{Error: "access key is required"})
 		return
@@ -567,17 +565,17 @@ func handleS3(c *gin.Context, req DBCheckRequest) {
 		region = "us-east-1"
 	}
 
-	// If host looks like AWS S3, normalize to the correct regional endpoint
-	endpoint := fmt.Sprintf("https://%s:%s", req.Host, req.Port)
+	// Build endpoint — for AWS, normalize to regional endpoint
+	endpoint := req.Host + ":" + req.Port
+	useSSL := true
 	if req.Host == "s3.amazonaws.com" || strings.HasSuffix(req.Host, ".amazonaws.com") {
-		endpoint = fmt.Sprintf("https://s3.%s.amazonaws.com", region)
-		// Extract region from host if user already specified it (e.g. s3.us-west-2.amazonaws.com)
+		endpoint = "s3." + region + ".amazonaws.com"
 		if req.Host != "s3.amazonaws.com" {
 			parts := strings.TrimSuffix(req.Host, ".amazonaws.com")
 			parts = strings.TrimPrefix(parts, "s3.")
 			if parts != "" && req.Region == "" {
 				region = parts
-				endpoint = fmt.Sprintf("https://s3.%s.amazonaws.com", region)
+				endpoint = "s3." + region + ".amazonaws.com"
 			}
 		}
 	}
@@ -587,16 +585,14 @@ func handleS3(c *gin.Context, req DBCheckRequest) {
 
 	output.WriteString(fmt.Sprintf("Connecting to S3-compatible store at %s (region: %s)...\n", endpoint, region))
 
-	sess, err := session.NewSession(&aws.Config{
-		Endpoint:         aws.String(endpoint),
-		Region:           aws.String(region),
-		Credentials:      credentials.NewStaticCredentials(req.Username, req.Password, ""),
-		S3ForcePathStyle: aws.Bool(true),
-		DisableSSL:       aws.Bool(false),
+	client, err := minio.New(endpoint, &minio.Options{
+		Creds:  credentials.NewStaticV4(req.Username, req.Password, ""),
+		Secure: useSSL,
+		Region: region,
 	})
 	if err != nil {
 		duration := time.Since(start)
-		output.WriteString(fmt.Sprintf("Failed to create session: %s\n", err.Error()))
+		output.WriteString(fmt.Sprintf("Failed to create client: %s\n", err.Error()))
 		c.JSON(http.StatusOK, CheckResponse{
 			Success:    false,
 			Output:     output.String(),
@@ -606,15 +602,13 @@ func handleS3(c *gin.Context, req DBCheckRequest) {
 		return
 	}
 
-	svc := s3.New(sess)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
 	if req.Database != "" {
 		// Check specific bucket
 		output.WriteString(fmt.Sprintf("Checking bucket: %s\n", req.Database))
-		result, err := svc.ListObjectsV2(&s3.ListObjectsV2Input{
-			Bucket:  aws.String(req.Database),
-			MaxKeys: aws.Int64(5),
-		})
+		exists, err := client.BucketExists(ctx, req.Database)
 		if err != nil {
 			duration := time.Since(start)
 			output.WriteString(fmt.Sprintf("Bucket check FAILED: %s\n", err.Error()))
@@ -626,18 +620,35 @@ func handleS3(c *gin.Context, req DBCheckRequest) {
 			})
 			return
 		}
+		if !exists {
+			duration := time.Since(start)
+			output.WriteString(fmt.Sprintf("Bucket '%s' does not exist\n", req.Database))
+			c.JSON(http.StatusOK, CheckResponse{
+				Success:    false,
+				Output:     output.String(),
+				Error:      "bucket not found",
+				DurationMs: duration.Milliseconds(),
+			})
+			return
+		}
 		output.WriteString("Connection successful!\n\n")
 		output.WriteString(fmt.Sprintf("Bucket '%s' is accessible\n", req.Database))
-		output.WriteString(fmt.Sprintf("Objects found (showing up to 5):\n"))
-		if len(result.Contents) == 0 {
-			output.WriteString("  (empty bucket)\n")
+		output.WriteString("Objects found (showing up to 5):\n")
+		count := 0
+		for obj := range client.ListObjects(ctx, req.Database, minio.ListObjectsOptions{MaxKeys: 5}) {
+			if obj.Err != nil {
+				output.WriteString(fmt.Sprintf("  Error listing: %s\n", obj.Err.Error()))
+				break
+			}
+			output.WriteString(fmt.Sprintf("  %s (%d bytes)\n", obj.Key, obj.Size))
+			count++
 		}
-		for _, obj := range result.Contents {
-			output.WriteString(fmt.Sprintf("  %s (%d bytes)\n", *obj.Key, *obj.Size))
+		if count == 0 {
+			output.WriteString("  (empty bucket)\n")
 		}
 	} else {
 		// List buckets
-		result, err := svc.ListBuckets(&s3.ListBucketsInput{})
+		buckets, err := client.ListBuckets(ctx)
 		if err != nil {
 			duration := time.Since(start)
 			output.WriteString(fmt.Sprintf("Connection FAILED: %s\n", err.Error()))
@@ -650,9 +661,9 @@ func handleS3(c *gin.Context, req DBCheckRequest) {
 			return
 		}
 		output.WriteString("Connection successful!\n\n")
-		output.WriteString(fmt.Sprintf("Buckets found: %d\n", len(result.Buckets)))
-		for _, b := range result.Buckets {
-			output.WriteString(fmt.Sprintf("  %s (created %s)\n", *b.Name, b.CreationDate.Format(time.RFC3339)))
+		output.WriteString(fmt.Sprintf("Buckets found: %d\n", len(buckets)))
+		for _, b := range buckets {
+			output.WriteString(fmt.Sprintf("  %s (created %s)\n", b.Name, b.CreationDate.Format(time.RFC3339)))
 		}
 	}
 
