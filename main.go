@@ -321,7 +321,13 @@ func handleDatabase(c *gin.Context) {
 		return
 	}
 
-	if err := validateHost(req.Host); err != nil {
+	// For S3, strip protocol prefix before validation
+	hostForValidation := req.Host
+	if req.DBType == "s3" {
+		hostForValidation = strings.TrimPrefix(hostForValidation, "https://")
+		hostForValidation = strings.TrimPrefix(hostForValidation, "http://")
+	}
+	if err := validateHost(hostForValidation); err != nil {
 		c.JSON(http.StatusBadRequest, CheckResponse{Error: err.Error()})
 		return
 	}
@@ -566,18 +572,28 @@ func handleS3(c *gin.Context, req DBCheckRequest) {
 		return
 	}
 
+	// Strip protocol prefix and use it to determine SSL
+	host := req.Host
+	useSSL := true
+	if strings.HasPrefix(host, "https://") {
+		host = strings.TrimPrefix(host, "https://")
+		useSSL = true
+	} else if strings.HasPrefix(host, "http://") {
+		host = strings.TrimPrefix(host, "http://")
+		useSSL = false
+	}
+
 	region := req.Region
 	if region == "" {
 		region = "us-east-1"
 	}
 
 	// Build endpoint — for AWS, normalize to regional endpoint
-	endpoint := req.Host + ":" + req.Port
-	useSSL := true
-	if req.Host == "s3.amazonaws.com" || strings.HasSuffix(req.Host, ".amazonaws.com") {
+	endpoint := host + ":" + req.Port
+	if host == "s3.amazonaws.com" || strings.HasSuffix(host, ".amazonaws.com") {
 		endpoint = "s3." + region + ".amazonaws.com"
-		if req.Host != "s3.amazonaws.com" {
-			parts := strings.TrimSuffix(req.Host, ".amazonaws.com")
+		if host != "s3.amazonaws.com" {
+			parts := strings.TrimSuffix(host, ".amazonaws.com")
 			parts = strings.TrimPrefix(parts, "s3.")
 			if parts != "" && req.Region == "" {
 				region = parts

@@ -1,7 +1,7 @@
 ---
 applications:
-  - name: canitconnect2
-    memory: 1G
+  - name: canitconnect-v2
+    memory: 2G
     disk_quota: 1G
     buildpacks:
       - go_buildpack
